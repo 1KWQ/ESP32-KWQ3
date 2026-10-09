@@ -17,10 +17,12 @@
 #include "fan.h"
 #include "crc16.h"
 #include "CommandDispatcher.h"
+#include "EmmSystemHome.h"
+#include "SysInit.h"
 #include "Rs485Devices.h"
 #include "esp_log.h"
 
-#define PING_TIMEOUT 2   // ping超时 单位秒
+#define PING_TIMEOUT 20000   // ping超时 单位秒
 #define CMD_TIMEOUT  30  // 休眠指令超时 单位分钟
 
 /** @brief 5 路驱动芯片温度（℃，由 pollInterruptTask 周期刷新）。 */

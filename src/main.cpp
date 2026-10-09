@@ -13,7 +13,12 @@
  *              系统电源控制、5 路驱动温度轮询；
  *            - 三色灯任务、风扇、ADC；
  *            - 共享 RS485 总线（SV04M 阀头 / GFL-Z 激光 / EMM V5 电机）；
- *            - EMM 安全监控：接近开关急停监控、升降电机相电流扎偏监控。
+ *            - EMM 安全监控：接近开关急停监控、升降电机相电流扎偏监控；
+ *            - EMM 整机回零（L2 复合动作，EmmSystemHome）：常驻任务，
+ *              由 SET EMM SYSTEM HOME 触发 12 步回零序列；
+ *            - 系统初始化流程（SysInit）：常驻任务，由 SET POWER ON 触发，
+ *              上电稳定等待 → 前置检查（心跳/开关门/样品盘/温度）→
+ *              六通阀（暂跳过）→ 自动启动整机回零。
  *
  *          暂不激活：CH9120 网络透传（源码保留，待后续需要时再调用
  *          Ch9120Net_Init()/Ch9120Net_Poll() 激活）。
@@ -155,7 +160,7 @@ void checkPCAlive()
          // 串口断连
         ping_on_line = false;
         rygLedOn(RYG_COLOR_RED); // 红色长亮
-        ESP_LOGE(TAG, "PING TIME OUT");
+        Serial.printf("[PING] 超时，串口断连，PING_TIMEOUT=%d s\n", PING_TIMEOUT);
     }
 
      // -------- CMD 超时 --------
@@ -171,7 +176,7 @@ void checkPCAlive()
             Rs485Bus_Give();
         }
         sysPoweronoFF(0);    // 关电
-        ESP_LOGE(TAG, "CMD TIME OUT , NOW SLEEP");   
+        Serial.printf("[CMD] 超时，进入休眠，CMD_TIMEOUT=%d min\n", CMD_TIMEOUT);   
     }
 }
 
@@ -236,6 +241,29 @@ void setup()
     printModuleStatus("EmmLiftCurrentMonitor", liftCurrentMonitorOk);
     if (!liftCurrentMonitorOk) {
         ESP_LOGE(TAG, "EMM lift current monitor task create failed");
+    }
+
+    /*
+     * 创建整机回零（L2 复合动作）常驻任务。该任务默认阻塞等待
+     * SET EMM SYSTEM HOME 通知，收到命令后才驱动 12 步回零序列；依赖
+     * Rs485Devices_Init() 建立的共享总线，因此必须在其之后创建。
+     */
+    bool systemHomeOk = EmmSystemHome_Init();
+    printModuleStatus("EmmSystemHome", systemHomeOk);
+    if (!systemHomeOk) {
+        ESP_LOGE(TAG, "EMM system home task create failed");
+    }
+
+    /*
+     * 创建系统初始化流程（SysInit）常驻任务。该任务默认阻塞等待通知，收到
+     * `SET POWER ON` 后由 cmdPower 唤醒，执行：上电稳定等待 → 前置检查
+     * （心跳/开关门/样品盘/温度）→ 六通阀（暂跳过）→ 启动整机回零。
+     * 它依赖 EmmSystemHome_Init() 建立的回零任务，因此必须在其之后创建。
+     */
+    bool sysInitOk = SysInit_Init();
+    printModuleStatus("SysInit", sysInitOk);
+    if (!sysInitOk) {
+        ESP_LOGE(TAG, "SysInit task create failed");
     }
 
     printConfigSummary();

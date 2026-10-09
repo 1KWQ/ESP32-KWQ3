@@ -23,18 +23,30 @@ class EmmV5
 public:
     /**
      * @brief 底层串口/协议操作结果。
-     * @details STATUS_OK 表示单播 ACK 已匹配或广播帧已写出；广播没有设备级 ACK。
-     *          TIMEOUT 表示规定时间内没有收到任何有效响应，FRAME_ERROR 表示收到数据
-     *          但无法拼出合法帧，REJECTED 表示驱动器明确返回拒绝状态。
+     * @details 必须区分"命令被接受"与"动作已完成"两件事：
+     *          - STATUS_DONE：驱动器主动上报了动作完成帧 [addr][func][0x9F][0x6B]，
+     *            表示动作确实做完（到位 FD+9F、回零完成 9A+9F）。**仅当调用方显式
+     *            要求 requireDone=true 时才会返回该状态**；未要求时 0x9F 仍按历史
+     *            语义映射为 STATUS_OK，以保证既有调用方行为不变；
+     *          - STATUS_OK：只表示命令被驱动器接受（收到 0x02），或广播帧已写出；
+     *            广播没有设备级 ACK，动作是否完成需另行确认；
+     *          - STATUS_TIMEOUT：规定时间内没有收到任何有效响应；
+     *          - STATUS_FRAME_ERROR：收到数据但无法拼出合法帧；
+     *          - STATUS_REJECTED：驱动器明确返回拒绝状态（0xE2/0xEE 等）；
+     *          - STATUS_NOT_MOVED：驱动器返回 0x12/0x22，即"触发回零时已在零点 /
+     *            左右限位已触发"，电机不动——手册明确这不是错误，但与"动作完成"
+     *            也不是一回事，故单独一态交上层判断。
      */
     enum Status : int8_t {
+        STATUS_DONE = 1,
         STATUS_OK = 0,
         STATUS_TIMEOUT = -1,
         STATUS_FRAME_ERROR = -2,
         STATUS_REJECTED = -3,
         STATUS_INVALID_ARGUMENT = -4,
         STATUS_SERIAL_NOT_BEGIN = -5,
-        STATUS_WRITE_ERROR = -6
+        STATUS_WRITE_ERROR = -6,
+        STATUS_NOT_MOVED = -7
     };
 
     /**
@@ -204,12 +216,18 @@ public:
     /**
      * @brief 5.3.12 位置模式控制（0xFD），MODE 取 0/1/2。
      * @param pulses 目标位移脉冲数，按大端 32 位写入。
-     * @param timeoutMs 等待 ACK 的最长时间，不是电机运动完成时间。
+     * @param timeoutMs 等待应答的最长时间；requireDone=true 时它同时是等待
+     *        "动作完成上报 0x9F"的最长时间，应给足整段运动的时长。
+     * @param requireDone true 时要求驱动器主动上报 [addr][0xFD][0x9F][0x6B] 才算完成：
+     *        收到 0x02（命令已接受）后继续在同一个接收循环内等 0x9F；
+     *        等到则返回 STATUS_DONE，只收到 0x02 而超时则返回 STATUS_OK。
+     * @note requireDone=true 期间会一直占用 RS485 总线（调用方持锁），
+     *       因为一旦中途交还总线，其它任务的清缓冲会把 0x9F 丢掉。
      */
     Status positionMode(uint8_t address, uint8_t direction, uint16_t rpm,
                         uint8_t acceleration, uint32_t pulses,
                         uint8_t motionMode, bool synchronized = false,
-                        uint32_t timeoutMs = 300);
+                        uint32_t timeoutMs = 300, bool requireDone = false);
     /**
      * @brief 立即停止指定电机当前运动。
      * @param synchronized 为 true 时先缓存停止命令，等待同步触发后执行。
@@ -219,9 +237,11 @@ public:
     /**
      * @brief 5.4.2 触发回零（0x9A）。
      * @param mode 回零模式 0~5，具体方向/限位策略由驱动器参数决定。
+     * @param requireDone true 时要求驱动器主动上报 [addr][0x9A][0x9F][0x6B]
+     *        （回零完成）才算完成；语义与 positionMode() 的 requireDone 相同。
      */
     Status home(uint8_t address, uint8_t mode, bool synchronized = false,
-                uint32_t timeoutMs = 300);
+                uint32_t timeoutMs = 300, bool requireDone = false);
     /** @brief 5.4.3 强制中断并退出回零（0x9C/0x48）。 */
     Status interruptHome(uint8_t address, uint32_t timeoutMs = 300);
     /**
@@ -538,13 +558,19 @@ private:
     Response _lastResponse;
 
     /**
-     * @brief 发送单地址控制帧并等待 4 字节 ACK 响应。
-     * @details 响应格式为 [地址][功能码][状态][0x6B]。状态 0x02 或
-     *          0x9F 表示驱动器接受/到位，其它状态返回 STATUS_REJECTED。
+     * @brief 发送单地址控制帧并等待驱动器应答。
+     * @details 响应格式为 [地址][功能码][状态][0x6B]。状态映射为：
+     *          0x02 → 命令被接受；0x9F → 动作已完成（requireDone=true 时返回
+     *          STATUS_DONE，否则按历史语义返回 STATUS_OK）；0x12/0x22 → 合法但
+     *          电机不动；其它（0xE2/0xEE 等）→ 拒绝。
+     * @param requireDone true 时收到 0x02 后不返回，继续在同一个接收循环内等 0x9F；
+     *        等到返回 STATUS_DONE，只等到 0x02 而超时返回 STATUS_OK。
+     *        @note 必须在同一个循环内等完——若先返回再等，残留的 0x9F 会被下一次
+     *        clearRxBuffer() 清掉，永远收不到。
      */
     Status writeAndReadAck(uint8_t address, uint8_t function,
                            const uint8_t *frame, size_t frameLength,
-                           uint32_t timeoutMs);
+                           uint32_t timeoutMs, bool requireDone = false);
     /**
      * @brief 发送广播帧或无需应答的帧。
      * @note 地址 0 广播后多个电机可能同时动作，因此协议层不等待响应。

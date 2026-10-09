@@ -11,9 +11,9 @@
  *          - EMM V5 / X42S 单一动作命令（与《EMM电机上位机命令手册.md》一一对应）；
  *          - 本工程保留的外设命令：PING / SET POWER / SET RYG / SET TEMP /
  *            GET TEMP / SET FA / SET VALVE / GET VALVE / GET LASER。
- *          复合回零（SET EMM SYSTEM HOME）、EMM 任务流程（SET EMM TASK *）、
- *          XYZ/ZS/序列相关命令均已移除。GET STATUS 仅保留命令名，实现留空，
- *          待后续增加复合回零与任务序列时补充。
+ *          复合回零（SET EMM SYSTEM HOME，L2 层，实现见 EmmSystemHome.cpp）、
+ *          EMM 任务流程（SET EMM TASK *）、XYZ/ZS/序列相关命令均已移除。
+ *          GET STATUS 仅保留命令名，实现留空，待后续增加任务序列时补充。
  */
 
 #include "CommandDispatcher.h"
@@ -135,6 +135,8 @@ static const CmdEntry cmdTable[] = {
     {"SET EMM HOME STOP", cmdSetEmmHomeStop},
     {"SET EMM HOME PARAM", cmdSetEmmHomeParams},
     {"SET EMM HOME", cmdSetEmmHome},
+    {"SET EMM SYSTEM HOME STOP", cmdSetEmmSystemHomeStop},//L2 整机回零：中止
+    {"SET EMM SYSTEM HOME", cmdSetEmmSystemHome},//L2 整机回零：启动（12 步序列）
     {"SET EMM ZERO", cmdSetEmmZero},//将当前角度清零5.2.3
     {"SET EMM SYNC", cmdSetEmmSync},
     {"SET EMM ORIGIN ZERO", cmdSetEmmOriginZero},//单圈回零的零点设置
@@ -262,6 +264,19 @@ bool CommandDispatcher::dispatch(const char *cmd, int seq)
         Serial.println();
     }
 
+    /*
+     * 整机回零（L2 复合动作）运行期间独占 2/3/4 号 EMM 电机，此时拒绝其它
+     * 会触发动作或修改电机状态的 EMM 命令，避免上位机在回零途中插入单步运动
+     * 造成机械冲突。回零自身的启动/中止命令与 GET 查询命令不在拦截范围内，
+     * 具体判据见 EmmSystemHome_BlocksCommand()。
+     */
+    if (isEmmCommand && EmmSystemHome_BlocksCommand(entry->name)) {
+        Serial.printf("[EMM命令] @%d %s 被拒绝：整机回零正在运行\n",
+                      seq, entry->name);
+        sendWithCRC("ERR @%d %d", seq, SEQ_RUNNING);
+        return false;
+    }
+
     bool handled = entry->handler(args, seq);
     if (isEmmCommand) {
         Serial.printf("[EMM命令] @%d %s，%s\n", seq, entry->name,
@@ -285,7 +300,7 @@ static bool cmdPing(const char *args, int seq)
 
     ping_on_line = true;
     lastPingTime = millis();
-    sendWithCRC("PONG @%d", seq);
+    sendWithCRC("PING @%d", seq);
     return true;
 }
 
@@ -293,6 +308,11 @@ static bool cmdPing(const char *args, int seq)
  * @brief 系统电源通断。
  * @cmd   SET POWER ON | SET POWER OFF
  * @note  KWQ3 仅控制结构电源，不再联动 XYZ/ZS/序列任务。
+ *        `SET POWER ON` 合上结构电源后，会**自动触发一次系统初始化流程**
+ *        （SysInit_Run）：等待上电稳定 → 前置检查（心跳/开关门/样品盘/温度）
+ *        → 六通阀（暂跳过）→ 启动整机回零。初始化在后台任务中执行，
+ *        本函数不等待其结束；初始化结果仅通过串口日志体现，因此无论初始化
+ *        是否通过，此处都回复 `OK @<seq> POWER ON`。
  */
 static bool cmdPower(const char *args, int seq)
 {
@@ -304,6 +324,8 @@ static bool cmdPower(const char *args, int seq)
         cmd_power_off = false;
         sysPoweronoFF(1);
         sendWithCRC("OK @%d POWER ON", seq);
+        /* 先回复上位机，再启动初始化，保证 ACK 不被初始化耗时拖延。 */
+        SysInit_Run();
         return true;
     }
     if (strstr(args, "OFF"))

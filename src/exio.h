@@ -55,6 +55,13 @@ bool checkSysPwr();
 
 bool checkWaterBottleState();
 
+/**
+ * @brief 取 5 路驱动芯片温度中的最大值（℃）。
+ * @details 数据源为 pollInterruptTask 周期刷新的 driverTemp[]。上电初期尚未
+ *          完成首次采样时各通道为 0，返回值自然为 0。用于前置检查与风扇调速。
+ */
+float getMaxDriverTemp(void);
+
 void exIOInit();
 
 extern PCAGPIO pca;

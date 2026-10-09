@@ -25,8 +25,16 @@ static const char *const TAG = "EMM_V5";
 static const uint8_t FRAME_END = 0x6B;
 /** 普通命令执行成功时驱动器返回的状态码。 */
 static const uint8_t ACK_OK = 0x02;
-/** 部分运动命令在目标已经到达时返回的成功状态码。 */
+/** 部分运动命令在目标已经到达时返回的成功状态码；也是主动上报"动作完成"的状态码。 */
 static const uint8_t ACK_REACHED = 0x9F;
+/**
+ * 触发回零时"已在零点"（0x12）与"左右限位已触发"（0x22）。
+ * @details 手册 4.1.2 明确这两种应答表示电机不动，但**不是错误**；因此既不能
+ *          当成 STATUS_OK（动作并没做完），也不能当成 STATUS_REJECTED（命令没错），
+ *          这里单独映射为 STATUS_NOT_MOVED 交上层判断。
+ */
+static const uint8_t ACK_AT_ZERO = 0x12;
+static const uint8_t ACK_LIMIT_TRIGGERED = 0x22;
 
 /* ==================== 对象初始化与公共状态 ==================== */
 
@@ -119,7 +127,8 @@ EmmV5::Status EmmV5::position(uint8_t address, uint8_t direction,
 EmmV5::Status EmmV5::positionMode(uint8_t address, uint8_t direction,
                                   uint16_t rpm, uint8_t acceleration,
                                   uint32_t pulses, uint8_t motionMode,
-                                  bool synchronized, uint32_t timeoutMs)
+                                  bool synchronized, uint32_t timeoutMs,
+                                  bool requireDone)
 {
     if (!isValidAddress(address) || direction > 1 || rpm > 3000 ||
         motionMode > 2) return STATUS_INVALID_ARGUMENT;
@@ -128,7 +137,8 @@ EmmV5::Status EmmV5::positionMode(uint8_t address, uint8_t direction,
         acceleration, (uint8_t)(pulses >> 24), (uint8_t)(pulses >> 16),
         (uint8_t)(pulses >> 8), (uint8_t)pulses, motionMode,
         (uint8_t)synchronized, FRAME_END};
-    return writeAndReadAck(address, 0xFD, frame, sizeof(frame), timeoutMs);
+    return writeAndReadAck(address, 0xFD, frame, sizeof(frame), timeoutMs,
+                           requireDone);
 }
 
 /**
@@ -150,12 +160,14 @@ EmmV5::Status EmmV5::stop(uint8_t address, bool synchronized,
  * @param synchronized 是否将回零命令缓存到同步队列。
  */
 EmmV5::Status EmmV5::home(uint8_t address, uint8_t mode,
-                          bool synchronized, uint32_t timeoutMs)
+                          bool synchronized, uint32_t timeoutMs,
+                          bool requireDone)
 {
     if (!isValidAddress(address) || mode > 5) return STATUS_INVALID_ARGUMENT;
     const uint8_t frame[] = {address, 0x9A, mode, (uint8_t)synchronized,
                              FRAME_END};
-    return writeAndReadAck(address, 0x9A, frame, sizeof(frame), timeoutMs);
+    return writeAndReadAck(address, 0x9A, frame, sizeof(frame), timeoutMs,
+                           requireDone);
 }
 
 /**
@@ -1218,14 +1230,26 @@ EmmV5::Status EmmV5::readBroadcastAddressFrame(uint8_t &detectedAddress,
 }
 
 /**
- * @brief 发送单播控制帧并等待 ACK。
+ * @brief 发送单播控制帧并等待驱动器应答。
  * @details 发送前清空输入缓存，随后在超时时间内从串口流中寻找匹配的
  *          [地址][功能码][状态][0x6B]。如果把本次 TX 回显到 RX，会跳过该回显，
  *          防止 RS485 收发器回显被误判为电机应答。
+ *
+ *          requireDone=true 时语义变为"必须等到动作完成"：驱动器把
+ *          Response 菜单设为 Both 后，会先回 0x02（命令已接受），动作真正做完
+ *          再主动回 0x9F。因此这里收到 0x02 后**不返回**，而是继续在同一个接收
+ *          循环里等 0x9F。这一点必须成立：一旦先返回、把总线交还出去，下一次
+ *          事务的 clearRxBuffer() 会把后面到达的 0x9F 清掉，永远等不到。
+ *
+ * @return STATUS_DONE  收到 0x9F，动作已完成；
+ *         STATUS_OK    收到 0x02（requireDone=false 时即返回；true 时表示命令
+ *                      已被接受但未等到 0x9F，由上层决定是否回退轮询）；
+ *         STATUS_NOT_MOVED 收到 0x12/0x22（合法但电机不动）；
+ *         STATUS_REJECTED / STATUS_TIMEOUT / STATUS_FRAME_ERROR 见 Status 注释。
  */
 EmmV5::Status EmmV5::writeAndReadAck(uint8_t address, uint8_t function,
                                      const uint8_t *frame, size_t frameLength,
-                                     uint32_t timeoutMs)
+                                     uint32_t timeoutMs, bool requireDone)
 {
     if (!_begun) return STATUS_SERIAL_NOT_BEGIN;
     if (!isValidAddress(address) || frame == nullptr || frameLength == 0) {
@@ -1238,27 +1262,89 @@ EmmV5::Status EmmV5::writeAndReadAck(uint8_t address, uint8_t function,
 
     uint8_t rx[64] = {0};
     size_t rxLength = 0;
+    /*
+     * 已被消费掉的应答帧起点。
+     * @details requireDone=true 时收到 0x02 后要继续等 0x9F；若不记录这条 0x02
+     *          已被消费，下一轮滑动扫描会反复匹配到同一条帧，导致 0x9F 永远排不上。
+     */
+    size_t scanFrom = 0;
     bool receivedData = false;
+    bool accepted = false;   ///< 是否已经收到 0x02（命令被接受）。
     uint32_t start = millis();
     while ((uint32_t)(millis() - start) < timeoutMs) {
         while (_serial->available() > 0) {
             receivedData = true;
             uint8_t value = (uint8_t)_serial->read();
-            if (rxLength < sizeof(rx)) rx[rxLength++] = value;
-            else { memmove(rx, rx + 1, sizeof(rx) - 1); rx[sizeof(rx) - 1] = value; }
+            if (rxLength < sizeof(rx)) {
+                rx[rxLength++] = value;
+            } else {
+                memmove(rx, rx + 1, sizeof(rx) - 1);
+                rx[sizeof(rx) - 1] = value;
+                if (scanFrom > 0) --scanFrom;   /* 缓冲区整体左移一字节。 */
+            }
             if (rxLength < 4) continue;
-            for (size_t i = 0; i + 4 <= rxLength; ++i) {
+            for (size_t i = scanFrom; i + 4 <= rxLength; ++i) {
                 if (rx[i] != address || rx[i + 1] != function ||
                     rx[i + 3] != FRAME_END) continue;
                 if (frameLength == 4 && memcmp(&rx[i], frame, 4) == 0) continue;
+
+                const uint8_t ackStatus = rx[i + 2];
                 saveResponse(&rx[i], 4);
                 logFrame("RX", &rx[i], 4);
-                return (rx[i + 2] == ACK_OK || rx[i + 2] == ACK_REACHED)
-                           ? STATUS_OK : STATUS_REJECTED;
+
+                /* 0x12/0x22：驱动器明确告知"电机不会动"，既不是成功也不是故障。 */
+                if (ackStatus == ACK_AT_ZERO || ackStatus == ACK_LIMIT_TRIGGERED) {
+                    ESP_LOGW(TAG,
+                             "[应答] A=%u FUNC=0x%02X ACK_STATUS=0x%02X："
+                             "已在零点或限位已触发，电机不动（手册 4.1.2，非错误）",
+                             (unsigned)address, (unsigned)function,
+                             (unsigned)ackStatus);
+                    return STATUS_NOT_MOVED;
+                }
+
+                /* 0x02：命令被接受。 */
+                if (ackStatus == ACK_OK) {
+                    accepted = true;
+                    if (!requireDone) return STATUS_OK;
+                    /*
+                     * 需要等动作完成：把这条 0x02 记为"已消费"，继续留在同一个
+                     * 接收循环里等后面的 0x9F。
+                     */
+                    scanFrom = i + 4;
+                    break;
+                }
+
+                /* 0x9F：驱动器主动上报"动作已完成"。 */
+                if (ackStatus == ACK_REACHED) {
+                    /*
+                     * 行为兼容：requireDone=false 时沿用历史语义，把 0x9F 也算作
+                     * STATUS_OK（既有调用方一律以 "== STATUS_OK" 判成功，不能改变
+                     * 它们看到的结果）。只有显式 requireDone=true 才区分为
+                     * STATUS_DONE，表示"动作确实做完"。
+                     */
+                    return requireDone ? STATUS_DONE : STATUS_OK;
+                }
+
+                /* 其余（0xE2/0xEE/...）：明确的拒绝。 */
+                ESP_LOGW(TAG,
+                         "[诊断] 驱动器拒绝：A=%u FUNC=0x%02X ACK_STATUS=0x%02X"
+                         "（既非 0x02 成功也非 0x9F 到位）",
+                         (unsigned)address, (unsigned)function,
+                         (unsigned)ackStatus);
+                return STATUS_REJECTED;
             }
         }
         delay(1);
     }
+
+    /*
+     * 超时收尾：
+     *   - 收到过 0x02 但没等到 0x9F：命令确实被接受了，只是"动作完成"事件没到，
+     *     返回 STATUS_OK，由上层决定是否回退到轮询判据（0x3B / 0x3A）；
+     *   - 什么都没收到：超时；
+     *   - 收到过字节但拼不出合法帧：帧错误。
+     */
+    if (accepted) return STATUS_OK;
     return receivedData ? STATUS_FRAME_ERROR : STATUS_TIMEOUT;
 }
 
@@ -1430,6 +1516,7 @@ uint32_t EmmV5::be32(const uint8_t *p)
 const char *EmmV5::statusToString(Status status)
 {
     switch (status) {
+    case STATUS_DONE: return "DONE";
     case STATUS_OK: return "OK";
     case STATUS_TIMEOUT: return "TIMEOUT";
     case STATUS_FRAME_ERROR: return "FRAME_ERROR";
@@ -1437,6 +1524,7 @@ const char *EmmV5::statusToString(Status status)
     case STATUS_INVALID_ARGUMENT: return "INVALID_ARGUMENT";
     case STATUS_SERIAL_NOT_BEGIN: return "SERIAL_NOT_BEGIN";
     case STATUS_WRITE_ERROR: return "WRITE_ERROR";
+    case STATUS_NOT_MOVED: return "NOT_MOVED";
     default: return "UNKNOWN";
     }
 }
