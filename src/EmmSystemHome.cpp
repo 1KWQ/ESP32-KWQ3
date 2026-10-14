@@ -20,10 +20,19 @@
  *          所有 EMM 事务都遵循与 L1 相同的约定：先 Rs485Bus_Take()，再调用
  *          gEmm.*，最后 Rs485Bus_Give()，保证与阀头、激光传感器、急停监控和
  *          相电流监控不会在同一时刻争用总线。
+ *
+ *          **回零完成判据**：`0x3B` 的 bit2/bit3 判据已集中到 `EmmMotionJudge.h`
+ *          的 `emmHomingFeed()`（2026/10/10 抽取），与任务序列的
+ *          `EmmTaskSeq::emmSeqWaitHomingAll` **共用同一份实现**，避免两处行为分叉。
+ *          本文件只保留"轮询 + 中止标志 + 日志 + 收尾动作"。
+ *          注意 `emmHomeWaitMove()`（定位回退路径）**仍用旧的 `moved` 判据**，
+ *          迁移列为第二批（会改变行为，需单独实机验证）。
  */
 
 #include "common.h"
 #include "EmmSystemHome.h"
+/** 运动/回零"完成判据"的唯一实现（纯函数，无 IO）。 */
+#include "EmmMotionJudge.h"
 
 #include <string.h>
 
@@ -69,7 +78,7 @@
 #define EMM_HOME_TRIGGER_MAX_WAIT_MS   15000U
 
 /** 单步绝对定位等待上限，单位 ms。 */
-#define EMM_HOME_MOVE_MAX_WAIT_MS      60000U
+#define EMM_HOME_MOVE_MAX_WAIT_MS      20000U
 
 /** 连续通信失败次数上限；达到即判定该步失败，避免故障设备永久占用总线。 */
 #define EMM_HOME_MAX_COMM_ERRORS       3U
@@ -147,56 +156,41 @@ static void emmHomeStopAllMotors(void)
 }
 
 /**
- * @brief 写回零参数（0x4C/0xAE）。
- * @details 采用"读-改-写"：先读回驱动器当前回零参数，只覆盖本步显式给出的
- *          字段，其余字段原样写回。这样序列里写 `HOME PARAM RPM=85` 这种
- *          只给单个字段的写法不会把其它参数意外清零。
- *          始终使用 SAVE=0，即只改运行参数、不写掉电保存区。
- * @param mode      -1 表示沿用驱动器当前值，否则为回零模式 0~5。
- * @param direction -1 表示沿用当前值，否则为回零方向 0/1。
- * @param rpm       -1 表示沿用当前值，否则为回零速度（RPM）。
- * @param timeoutMs -1 表示沿用当前值，否则为驱动器回零超时（ms）。
+ * @brief 全量写回零参数（0x4C/0xAE）。
+ * @details 8 个字段全部显式给出，**直接整组下发，不再"读-改-写"**。
+ *          早期实现是"先 readHomeParams() 读回驱动器当前值，只覆盖本步显式
+ *          给出的字段，其余原样写回"。该做法有两个隐患：
+ *            1. 驱动器里存的若是未初始化值或上一次任务残留的参数，会被原样
+ *               带回，等于把未知值写进回零参数；
+ *            2. 每次都要多一次读往返，占用共享总线。
+ *          现改为每次下发完整参数（值来源：《功能文档.txt》"程序回零过程"一节，
+ *          逐条对应本序列的步 1/4/7/10）。始终 SAVE=0，即只改运行参数、
+ *          不写掉电保存区。
+ * @param mode      回零模式 0~5（本序列用 2=无限位碰撞回零）。
+ * @param direction 回零方向 0=CW / 1=CCW。
+ * @param rpm       回零速度（RPM）。
+ * @param timeoutMs 驱动器回零超时（ms）。
+ * @param stallRpm  碰撞检测转速（RPM）。
+ * @param stallMa   碰撞检测电流（mA）。
+ * @param stallMs   碰撞检测持续时间（ms）。
+ * @param autoHome  是否上电自动回零。
  * @return true 表示本步成功；false 表示失败，调用方应中止流程。
  */
 static bool emmHomeStepParam(uint8_t address, const char *label,
-                             int32_t mode, int32_t direction,
-                             int32_t rpm, int32_t timeoutMs)
+                             uint8_t mode, uint8_t direction,
+                             uint16_t rpm, uint32_t timeoutMs,
+                             uint16_t stallRpm, uint16_t stallMa,
+                             uint16_t stallMs, bool autoHome)
 {
     emmHomePrintStep(label);
-
-    uint8_t curMode = 0, curDirection = 0;
-    uint16_t curRpm = 0, curStallRpm = 0, curStallMa = 0, curStallMs = 0;
-    uint32_t curTimeout = 0;
-    bool curAutoHome = false;
-
-    if (!Rs485Bus_Take(EMM_HOME_BUS_TIMEOUT_MS)) {
-        Serial.println("[回零]   失败：RS485 总线繁忙，无法读取当前回零参数");
-        return false;
-    }
-    EmmV5::Status status = gEmm.readHomeParams(
-        address, curMode, curDirection, curRpm, curTimeout,
-        curStallRpm, curStallMa, curStallMs, curAutoHome,
-        EMM_HOME_CMD_TIMEOUT_MS);
-    Rs485Bus_Give();
-    if (status != EmmV5::STATUS_OK) {
-        Serial.printf("[回零]   失败：A=%u 读取回零参数异常，状态=%s\n",
-                      (unsigned)address, EmmV5::statusToString(status));
-        return false;
-    }
-
-    const uint8_t  newMode      = (mode      >= 0) ? (uint8_t)mode      : curMode;
-    const uint8_t  newDirection = (direction >= 0) ? (uint8_t)direction : curDirection;
-    const uint16_t newRpm       = (rpm       >= 0) ? (uint16_t)rpm      : curRpm;
-    const uint32_t newTimeout   = (timeoutMs >= 0) ? (uint32_t)timeoutMs : curTimeout;
 
     if (!Rs485Bus_Take(EMM_HOME_BUS_TIMEOUT_MS)) {
         Serial.println("[回零]   失败：RS485 总线繁忙，无法写入回零参数");
         return false;
     }
-    status = gEmm.modifyHomeParams(
+    const EmmV5::Status status = gEmm.modifyHomeParams(
         address, false /* SAVE=0：只改运行参数，不写掉电保存区 */,
-        newMode, newDirection, newRpm, newTimeout,
-        curStallRpm, curStallMa, curStallMs, curAutoHome,
+        mode, direction, rpm, timeoutMs, stallRpm, stallMa, stallMs, autoHome,
         EMM_HOME_CMD_TIMEOUT_MS);
     Rs485Bus_Give();
     if (status != EmmV5::STATUS_OK) {
@@ -205,9 +199,12 @@ static bool emmHomeStepParam(uint8_t address, const char *label,
         return false;
     }
 
-    Serial.printf("[回零]   A=%u 回零参数已写入(SAVE=0)：MODE=%u DIR=%u RPM=%u TIMEOUT=%lu ms\n",
-                  (unsigned)address, (unsigned)newMode, (unsigned)newDirection,
-                  (unsigned)newRpm, (unsigned long)newTimeout);
+    Serial.printf("[回零]   A=%u 回零参数已全量写入(SAVE=0)：MODE=%u DIR=%u RPM=%u "
+                  "TIMEOUT=%lu ms STALL_RPM=%u STALL_MA=%u STALL_MS=%u AUTO=%u\n",
+                  (unsigned)address, (unsigned)mode, (unsigned)direction,
+                  (unsigned)rpm, (unsigned long)timeoutMs,
+                  (unsigned)stallRpm, (unsigned)stallMa, (unsigned)stallMs,
+                  (unsigned)autoHome);
     return true;
 }
 
@@ -264,6 +261,10 @@ static void emmHomeDumpMotorState(uint8_t address, const char *stage)
  *            否则它同时可能是"刚上电、从未回零"的默认状态，不能当成功。
  *          超过 EMM_HOME_START_GRACE_MS 仍未见过 Org_SF=1 → 报"回零未执行"并失败。
  *          同时响应中止请求，并统计连续通信失败次数。
+ *
+ *          **判据本体已抽取到 `EmmMotionJudge.h` 的 `emmHomingFeed()`**
+ *          （2026/10/10），与 `EmmTaskSeq::emmSeqWaitHomingAll` 共用同一份实现；
+ *          本函数只保留轮询、中止标志、日志与"回零完成瞬间"的诊断快照。
  * @return true 表示回零完成；false 表示失败、超时或被中止。
  */
 static bool emmHomeWaitHoming(uint8_t address, uint32_t maxWaitMs)
@@ -307,45 +308,42 @@ static bool emmHomeWaitHoming(uint8_t address, uint32_t maxWaitMs)
         }
         commErrors = 0;
 
-        if ((flags & (EmmV5::ORIGIN_OVERHEAT | EmmV5::ORIGIN_OVERCURRENT)) != 0) {
+        /* 判据本体见 EmmMotionJudge.h 第五节（与任务序列的 emmSeqWaitHomingAll 共用）。 */
+        const EmmHomingPoll verdict =
+            emmHomingFeed(flags, &homingSeen,
+                          elapsed >= EMM_HOME_START_GRACE_MS);
+
+        if (verdict == EMM_HOMING_POLL_PROTECT) {
             Serial.printf("[回零]   失败：A=%u 驱动器保护已触发（过热/过流），FLAGS=0x%02X\n",
                           (unsigned)address, flags);
             return false;
         }
-
-        /* 只取 bit2/bit3；bit0/bit1 是编码器就绪位，默认恒为 1，必须屏蔽。 */
-        const uint8_t homeBits = (uint8_t)(flags & (EmmV5::ORIGIN_HOMING |
-                                                    EmmV5::ORIGIN_FAILED));
-
-        if (homeBits == EmmV5::ORIGIN_FAILED) {
+        if (verdict == EMM_HOMING_POLL_FAILED) {
             Serial.printf("[回零]   失败：A=%u 驱动器报告回零失败，FLAGS=0x%02X\n",
                           (unsigned)address, flags);
             return false;
         }
-        if (homeBits == EmmV5::ORIGIN_HOMING) {
-            homingSeen = true;
-            continue;
-        }
-
-        /*
-         * homeBits == 0x00：见过 Org_SF=1 才是"回零中 → 空闲"的正常收尾；
-         * 从未见过则可能只是"刚上电、从未回零"的默认状态，不能当成功。
-         */
-        if (homingSeen) {
-            Serial.printf("[回零]   A=%u 回零完成（轮询 0x3B 确认），耗时 %lu ms，FLAGS=0x%02X\n",
-                          (unsigned)address, (unsigned long)elapsed, (unsigned)flags);
-            if (Rs485Bus_Take(EMM_HOME_BUS_TIMEOUT_MS)) {
-                emmHomeDumpMotorState(address, "回零完成瞬间");
-                Rs485Bus_Give();
-            }
-            return true;
-        }
-        if (elapsed >= EMM_HOME_START_GRACE_MS) {
+        if (verdict == EMM_HOMING_POLL_NOT_STARTED) {
             Serial.printf("[回零]   失败：A=%u 从未观察到正在回零（Org_SF），"
                           "无法确认回零已执行，FLAGS=0x%02X\n",
                           (unsigned)address, (unsigned)flags);
             return false;
         }
+        if (verdict == EMM_HOMING_POLL_HOMING) {
+            continue;   /* 正在回零，继续等 */
+        }
+
+        /*
+         * EMM_HOMING_POLL_DONE：见过 Org_SF=1 之后回到空闲，才是"回零中 → 空闲"的
+         * 正常收尾（从未见过则可能只是"刚上电、从未回零"的默认状态，不能当成功）。
+         */
+        Serial.printf("[回零]   A=%u 回零完成（轮询 0x3B 确认），耗时 %lu ms，FLAGS=0x%02X\n",
+                      (unsigned)address, (unsigned long)elapsed, (unsigned)flags);
+        if (Rs485Bus_Take(EMM_HOME_BUS_TIMEOUT_MS)) {
+            emmHomeDumpMotorState(address, "回零完成瞬间");
+            Rs485Bus_Give();
+        }
+        return true;
     }
 }
 
@@ -586,8 +584,10 @@ static bool emmHomeRunSequence(void)
     s_emmHomeStepTotal = EMM_HOME_STEP_TOTAL;
 
     /* ---- 升降电机（A=3）：6 步 ---- */
+    /* 文档"程序回零过程"1：HOME PARAM A=3 MODE=2 DIR=0 RPM=85 TIMEOUT=10000
+       STALL_RPM=45 STALL_MA=320 STALL_MS=10 AUTO=0 */
     if (!emmHomeStepParam(EMM_LIFT_MOTOR, "升降电机写入回零参数(RPM=85)",
-                          -1, -1, 85, -1)) {
+                          2, 0, 50, 30000, 40, 500, 10, false)) {
         return false;
     }
     if (!emmHomeStepTrigger(EMM_LIFT_MOTOR, "升降电机碰撞回零",
@@ -598,35 +598,41 @@ static bool emmHomeRunSequence(void)
                          1, 50, 20, 10000, 1, EMM_HOME_MOVE_MAX_WAIT_MS)) {
         return false;
     }
+    /* 文档"程序回零过程"1：HOME PARAM A=3 MODE=2 DIR=0 RPM=40 TIMEOUT=10000
+       STALL_RPM=35 STALL_MA=450 STALL_MS=10 AUTO=0 */
     if (!emmHomeStepParam(EMM_LIFT_MOTOR, "升降电机写入回零参数(RPM=40)",
-                          -1, -1, 40, -1)) {
+                          2, 0, 40, 30000, 35, 450, 10, false)) {
         return false;
     }
     if (!emmHomeStepTrigger(EMM_LIFT_MOTOR, "升降电机碰撞回零(慢速复校)",
                             2, EMM_HOME_TRIGGER_MAX_WAIT_MS)) {
         return false;
     }
-    if (!emmHomeStepMove(EMM_LIFT_MOTOR, "升降电机下降至绝对位置 1800",
-                         1, 50, 20, 1800, 1, EMM_HOME_MOVE_MAX_WAIT_MS)) {
+    if (!emmHomeStepMove(EMM_LIFT_MOTOR, "升降电机下降至绝对位置 2200",
+                         1, 50, 20, 2000, 1, EMM_HOME_MOVE_MAX_WAIT_MS)) {
         return false;
     }
 
     /* ---- 旋转电机（A=2）：5 步 ---- */
+    /* 文档"程序回零过程"2：HOME PARAM A=2 MODE=2 DIR=1 RPM=40 TIMEOUT=1500
+       STALL_RPM=300 STALL_MA=500 STALL_MS=5 AUTO=0 */
     if (!emmHomeStepParam(EMM_ROTARY_MOTOR,
                           "旋转电机写入回零参数(DIR=1 RPM=40 TIMEOUT=1500)",
-                          -1, 1, 40, 1500)) {
+                          2, 1, 25, 6000, 300, 500, 5, false)) {
         return false;
     }
     if (!emmHomeStepTrigger(EMM_ROTARY_MOTOR, "旋转电机碰撞回零",
                             2, EMM_HOME_TRIGGER_MAX_WAIT_MS)) {
         return false;
     }
-    if (!emmHomeStepMove(EMM_ROTARY_MOTOR, "旋转电机移动至绝对位置 1000",
+    if (!emmHomeStepMove(EMM_ROTARY_MOTOR, "旋转电机移动至绝对位置 800",
                          0, 5, 5, 800, 1, EMM_HOME_MOVE_MAX_WAIT_MS)) {
         return false;
     }
+    /* 文档"程序回零过程"2：HOME PARAM A=2 MODE=2 DIR=1 RPM=8 TIMEOUT=10000
+       STALL_RPM=300 STALL_MA=500 STALL_MS=10 AUTO=0 */
     if (!emmHomeStepParam(EMM_ROTARY_MOTOR, "旋转电机写入回零参数(RPM=8)",
-                          -1, -1, 8, 10000)) {
+                          2, 1, 8, 10000, 10, 500, 10, false)) {
         return false;
     }
     if (!emmHomeStepTrigger(EMM_ROTARY_MOTOR, "旋转电机碰撞回零(慢速复校)",
@@ -667,6 +673,17 @@ static void emmHomeTask(void *argument)
             Serial.println("[回零] 流程未完成，正在停止全部 EMM 电机");
             emmHomeStopAllMotors();
         }
+
+        /*
+         * 把回零结果写入全局标志 `sys_is_homed`：供 GET STATUS 的 HOMING 字段
+         * 与后续"开始任务"的前置检查（回零检测）使用。失败或中止时清零，避免
+         * 拿"上一次回零成功"的旧状态去放行任务。
+         * 注意：样品盘回零按配置"失败忽略"，不影响本标志（见 emmHomeRunSequence）。
+         */
+        sys_is_homed = ok;
+        Serial.printf("[回零] sys_is_homed=%d（%s）\n",
+                      sys_is_homed ? 1 : 0,
+                      ok ? "已建立零点" : "回零未完成");
 
         s_emmHomeBusy = false;
         s_emmHomeStopRequested = false;
@@ -712,6 +729,19 @@ bool EmmSystemHome_Start(void)
     }
     if (s_emmHomeBusy) {
         Serial.println("[回零] 已拒绝启动：整机回零正在运行");
+        return false;
+    }
+
+    /*
+     * 任务序列（L2，EmmTaskSeq）运行期间独占机械机构，不允许再启动整机回零。
+     * 本函数是"启动回零"的**唯一入口**（上位机命令 `SET EMM SYSTEM HOME` 与
+     * 系统初始化 `SysInit` 都走它），所以互斥判据放在这里可一次覆盖两条路径：
+     *   - 上位机路径本已被 EmmTaskSeq_BlocksCommand() 在 dispatch() 拦下；
+     *   - 但 SysInit 是内部直接调用，不经过 dispatch()，必须在这里兜住，
+     *     否则会出现"任务序列与整机回零并行跑"（实机已复现）。
+     */
+    if (EmmTaskSeq_IsActive()) {
+        Serial.println("[回零] 已拒绝启动：任务序列正在运行");
         return false;
     }
 

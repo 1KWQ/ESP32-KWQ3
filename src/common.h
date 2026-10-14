@@ -19,10 +19,12 @@
 #include "CommandDispatcher.h"
 #include "EmmSystemHome.h"
 #include "SysInit.h"
+#include "EmmTaskQueue.h"
+#include "EmmTaskSeq.h"
 #include "Rs485Devices.h"
 #include "esp_log.h"
 
-#define PING_TIMEOUT 20000   // ping超时 单位秒
+#define PING_TIMEOUT 1800    // ping超时 单位秒（30 分钟；2026/10/10 由 20000 s 下调）
 #define CMD_TIMEOUT  30  // 休眠指令超时 单位分钟
 
 /** @brief 5 路驱动芯片温度（℃，由 pollInterruptTask 周期刷新）。 */
@@ -42,5 +44,14 @@ extern unsigned long lasCmdTime;
 extern volatile bool cmd_on_line;
 /** @brief 是否处于软件断电状态（true 时 EMM 运动命令返回 NO_STEP_PWR）。 */
 extern bool cmd_power_off;
+
+/**
+ * @brief 整机是否已经完成回零。
+ * @details 由整机回零（L2，EmmSystemHome）的 12 步序列**全部成功**后置位；
+ *          序列失败或中止时清零。供 `GET STATUS` 的 `HOMING` 字段与后续
+ *          "开始任务"的前置检查（回零检测）使用。
+ * @note 样品盘回零按配置"失败忽略"，不影响本标志。
+ */
+extern volatile bool sys_is_homed;
 
 #endif
