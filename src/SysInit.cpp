@@ -71,6 +71,16 @@ static volatile bool s_sysInitBusy = false;
 /** 最近一次初始化流程的结果状态。 */
 static volatile SysInitState s_sysInitState = SYS_INIT_IDLE;
 
+/**
+ * @brief 中止请求标志（断电 / 指令超时休眠收尾时由 `SysInit_Abort()` 置位）。
+ * @details 初始化流程开头有 `SYS_INIT_POWER_SETTLE_MS` 的上电稳定等待，若这段
+ *          时间内结构电源被切断，没有该标志的话流程醒来后仍会继续做前置检查并
+ *          调用 `EmmSystemHome_Start()`——等于在已断电的情况下硬启回零。后台任务
+ *          在三个检查点读它，一旦为 true 就立刻退出本次流程并复位状态。
+ *          由 `SysInit_Run()` 在"接受一次新请求"时清零，保证不会误伤下一次流程。
+ */
+static volatile bool s_sysInitAbortRequested = false;
+
 /* ==========================================================================
  * 内部辅助函数
  * ========================================================================== */
@@ -137,6 +147,30 @@ static bool sysInitPreChecks(void)
 }
 
 /**
+ * @brief 检查是否有中止请求，有则打印并复位流程状态。
+ * @details 供 `sysInitTask` 在三个"动作边界"调用。所谓动作边界，是指流程中
+ *          不处于任何不可中断的机械动作、可以安全退出的位置：
+ *            ① 收到启动通知后（尚未进入上电稳定等待）；
+ *            ② 上电稳定等待结束后（即将开始前置检查）；
+ *            ③ 前置检查通过后（即将启动整机回零）。
+ *          这里不检查"回零启动之后"——那一步之后回零已交给 EmmSystemHome，
+ *          是否中止由 EmmSystemHome 自己的 RequestStop 机制负责。
+ * @return true 表示已中止：状态已复位为空闲，调用方应 `continue` 回到阻塞态。
+ */
+static bool sysInitAbortCheckpoint(void)
+{
+    if (!s_sysInitAbortRequested) {
+        return false;
+    }
+
+    Serial.println("[初始化] 收到中止请求（断电/休眠），本次初始化立即退出");
+    s_sysInitAbortRequested = false;
+    s_sysInitBusy = false;
+    s_sysInitState = SYS_INIT_IDLE;
+    return true;
+}
+
+/**
  * @brief 初始化后台任务主体：默认阻塞等待启动通知，被唤醒后执行完整流程。
  * @param argument 未使用。
  */
@@ -148,6 +182,11 @@ static void sysInitTask(void *argument)
         /* 阻塞等待 SysInit_Run() 的启动通知，不占用 CPU。 */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        /* 检查点①：通知刚被拾取，尚未做任何事，是最省事的中止点。 */
+        if (sysInitAbortCheckpoint()) {
+            continue;
+        }
+
         s_sysInitState = SYS_INIT_RUNNING;
 
         Serial.println("[初始化] ================= 系统初始化开始 =================");
@@ -156,6 +195,15 @@ static void sysInitTask(void *argument)
         Serial.printf("[初始化] 等待结构电源稳定 %u ms ...\n",
                       (unsigned)SYS_INIT_POWER_SETTLE_MS);
         vTaskDelay(pdMS_TO_TICKS(SYS_INIT_POWER_SETTLE_MS));
+
+        /*
+         * 检查点②：上电稳定等待结束。这是最关键的中止点——若这 1.5s 内发生了
+         * `SET POWER OFF` 或指令超时休眠，必须在这里退出，否则接下来会去启动
+         * 整机回零（在已断电的机器上硬启回零）。
+         */
+        if (sysInitAbortCheckpoint()) {
+            continue;
+        }
 
         /* 1. 前置检查：任一项失败即中止。 */
         if (!sysInitPreChecks()) {
@@ -169,6 +217,15 @@ static void sysInitTask(void *argument)
          *    待后续接入 SV04M 实际切阀动作时，在此处替换为真实检查。
          */
         Serial.println("[初始化] 六通阀检查：暂未实现，跳过并视为通过");
+
+        /*
+         * 检查点③：前置检查已通过、六通阀已跳过，即将启动整机回零。在动手启动
+         * 回零之前再确认一次——前置检查里读温度/门/样品盘也会花掉可观的时间，
+         * 期间仍可能断电。
+         */
+        if (sysInitAbortCheckpoint()) {
+            continue;
+        }
 
         /* 3. 启动整机回零（异步，不等待结束）。 */
         if (EmmSystemHome_IsActive()) {
@@ -233,11 +290,35 @@ bool SysInit_Run(void)
     /*
      * 先同步置位占用标志，再唤醒任务。这样两次快速连续下发时，第二次会在
      * 这里被挡下，而不会出现"任务还没开始跑就被重复启动"的竞态。
+     *
+     * 同时清掉可能残留的中止请求：能走到这里说明上一轮流程已经结束（`busy`
+     * 已清零），旧的中止请求不应再影响这次全新的初始化。
      */
+    s_sysInitAbortRequested = false;
     s_sysInitBusy = true;
     s_sysInitState = SYS_INIT_RUNNING;
     xTaskNotifyGive(s_sysInitTaskHandle);
     return true;
+}
+
+void SysInit_Abort(void)
+{
+    if (s_sysInitBusy) {
+        /*
+         * 有流程在跑：只置中止请求，由后台任务在下一个检查点自行退出并复位
+         * 状态。这里**不直接清 busy**——后台任务可能正卡在上电稳定等待里，
+         * 直接清 busy 会让新的 SysInit_Run() 放行，而旧流程醒来后仍会去启动
+         * 整机回零，出现"新旧两套初始化"叠加。
+         */
+        s_sysInitAbortRequested = true;
+        Serial.println("[初始化] 已请求中止系统初始化，后台任务将在检查点退出");
+        return;
+    }
+
+    /* 没有流程在跑：把结果状态复位为空闲，保证断电后状态干净。 */
+    s_sysInitAbortRequested = false;
+    s_sysInitState = SYS_INIT_IDLE;
+    Serial.println("[初始化] 当前没有正在运行的初始化流程，状态已复位为空闲");
 }
 
 bool SysInit_IsActive(void)
