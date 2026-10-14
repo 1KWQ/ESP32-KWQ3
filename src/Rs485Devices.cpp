@@ -157,7 +157,15 @@ void Rs485Devices_Init(void)
     gLaser.begin(0x01);
 
     /** EMM 默认地址为 2；地址 1 已分配给 GFL-Z 激光传感器。 */
-    gEmm.setDebugEnabled(false);
+    /*
+     * 【临时·帧级调试】2026/10/10 排查"任务序列 1/9 同步步：广播触发后两台电机不动、
+     * 目标从未设置"。需要看 EMM 的原始 TX/RX 字节，用来对比：
+     *   - 手动发 L3 命令（能同步运动）时，缓存命令 / 触发帧 / 驱动器应答长什么样；
+     *   - 任务序列发同样的命令（不同步）时，线上字节差在哪里。
+     * 该开关**全局生效**、输出较啰嗦（每条帧一行 TX + 一行 RX）；
+     * 定位完成后请改回 `false`。详见《修改日志.md》§7.13。
+     */
+    gEmm.setDebugEnabled(true);
     gEmm.begin(EMM_DEFAULT_ADDR);
 
     s_rs485Inited = true;

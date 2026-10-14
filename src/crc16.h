@@ -20,7 +20,10 @@ typedef enum
     SEQ_RUNNING,    // 序列正在运行
     ST_PARAM_ERR,   // 循环任务 ST参数错误
     RS485_BUSY,     // RS485 总线忙
-    SV04M_CHANGE_FAILED // 切换 SV-04M 通道失败
+    SV04M_CHANGE_FAILED, // 切换 SV-04M 通道失败
+    TASK_FULL,      // 任务队列已满（SEQ ADD；队列上限 10 条，用户要求回明确错误）
+    NO_HEARTBEAT,   // 上位机心跳不在线（SEQ START 前置检查①；PING 超时未恢复）
+    TEMP_HIGH       // 控制板温度超限（SEQ START 前置检查；5 路驱动温度最大值 > SET TEMP 阈值）
 }ErrCode;
 
 

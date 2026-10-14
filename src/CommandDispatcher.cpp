@@ -12,8 +12,10 @@
  *          - 本工程保留的外设命令：PING / SET POWER / SET RYG / SET TEMP /
  *            GET TEMP / SET FA / SET VALVE / GET VALVE / GET LASER。
  *          复合回零（SET EMM SYSTEM HOME，L2 层，实现见 EmmSystemHome.cpp）、
- *          EMM 任务流程（SET EMM TASK *）、XYZ/ZS/序列相关命令均已移除。
- *          GET STATUS 仅保留命令名，实现留空，待后续增加任务序列时补充。
+ *          EMM 任务流程（SET EMM TASK *）、XYZ/ZS 相关命令均已移除。
+ *          任务序列命令 `SEQ ADD` / `SEQ CLEAR` / `GET STATUS` 在本文件实现
+ *          （只操作队列与协议），`SEQ START/PAUSE/RESUME/STOP` 与序列状态机
+ *          在 EmmTaskSeq.cpp 实现（L2 执行引擎）。
  */
 
 #include "CommandDispatcher.h"
@@ -39,6 +41,8 @@ static bool cmdSetRESTART(const char *args, int seq);
 static bool cmdSetValveChannel(const char *args, int seq);
 static bool cmdGetLaserDistance(const char *args, int seq);
 static bool cmdGetValveStatus(const char *args, int seq);
+static bool cmdSeqAdd(const char *args, int seq);
+static bool cmdSeqClear(const char *args, int seq);
 
 /**
  * @brief EMM V5/X42S 上位机命令处理函数声明。
@@ -125,6 +129,14 @@ static const CmdEntry cmdTable[] = {
     {"GET LASER", cmdGetLaserDistance},
     {"SET VALVE", cmdSetValveChannel},
     {"GET VALVE", cmdGetValveStatus},
+
+    /* ---- 任务序列（L2 队列管理 + 执行引擎，见 EmmTaskQueue / EmmTaskSeq）---- */
+    {"SEQ CLEAR", cmdSeqClear},   // 清空任务队列
+    {"SEQ ADD", cmdSeqAdd},       // 追加一条任务：SEQ ADD <c>=<A> T=<T>
+    {"SEQ START", cmdSeqStart},   // 开始执行：前置检查 → 从第 1 条开始跑
+    {"SEQ PAUSE", cmdSeqPause},   // 暂停（仅 RUNNING 时接受）
+    {"SEQ RESUME", cmdSeqResume}, // 恢复（仅 PAUSED 时接受）
+    {"SEQ STOP", cmdSeqStop},     // 中止并清空队列
 
     /********* EMM V5 闭环步进电机：命令名必须与上位机前缀匹配 *********/
     {"SET EMM ENABLE", cmdSetEmmEnable},
@@ -269,9 +281,15 @@ bool CommandDispatcher::dispatch(const char *cmd, int seq)
      * 会触发动作或修改电机状态的 EMM 命令，避免上位机在回零途中插入单步运动
      * 造成机械冲突。回零自身的启动/中止命令与 GET 查询命令不在拦截范围内，
      * 具体判据见 EmmSystemHome_BlocksCommand()。
+     *
+     * 任务序列（L2，EmmTaskSeq）运行期间同理独占机械机构，拦截规则见
+     * EmmTaskSeq_BlocksCommand()（多拦一条 SET EMM SYSTEM HOME，避免序列
+     * 中途被整机回零打断）。
      */
-    if (isEmmCommand && EmmSystemHome_BlocksCommand(entry->name)) {
-        Serial.printf("[EMM命令] @%d %s 被拒绝：整机回零正在运行\n",
+    if (isEmmCommand &&
+        (EmmSystemHome_BlocksCommand(entry->name) ||
+         EmmTaskSeq_BlocksCommand(entry->name))) {
+        Serial.printf("[EMM命令] @%d %s 被拒绝：复合动作（整机回零/任务序列）正在运行\n",
                       seq, entry->name);
         sendWithCRC("ERR @%d %d", seq, SEQ_RUNNING);
         return false;
@@ -307,12 +325,23 @@ static bool cmdPing(const char *args, int seq)
 /**
  * @brief 系统电源通断。
  * @cmd   SET POWER ON | SET POWER OFF
- * @note  KWQ3 仅控制结构电源，不再联动 XYZ/ZS/序列任务。
- *        `SET POWER ON` 合上结构电源后，会**自动触发一次系统初始化流程**
- *        （SysInit_Run）：等待上电稳定 → 前置检查（心跳/开关门/样品盘/温度）
- *        → 六通阀（暂跳过）→ 启动整机回零。初始化在后台任务中执行，
- *        本函数不等待其结束；初始化结果仅通过串口日志体现，因此无论初始化
- *        是否通过，此处都回复 `OK @<seq> POWER ON`。
+ * @note  `SET POWER ON`：合上结构电源后自动触发一次系统初始化（`SysInit_Run`）——
+ *        等待上电稳定 → 前置检查（心跳/开关门/样品盘/温度）→ 六通阀（暂跳过）
+ *        → 启动整机回零。初始化在后台任务中执行，本函数不等待其结束；结果仅通过
+ *        串口日志体现，因此无论初始化是否通过都回 `OK @<seq> POWER ON`。
+ *        **若任务序列仍在运行则跳过初始化**（避免与序列并行抢电机）。
+ *
+ *        `SET POWER OFF`：调用 `sysPowerOffCleanup()` 做**断电统一收尾**——
+ *        ① `EmmTaskSeq_Stop()` 终止任务序列并清空队列；
+ *        ② `EmmSystemHome_RequestStop()` 请求中止整机回零；
+ *        ③ `SysInit_Abort()` 请求中止系统初始化；
+ *        ④ 清回零跟踪表 / 升降过流计时 / 升降监控布防；
+ *        ⑤ 广播停止所有 EMM 电机；
+ *        ⑥ 断结构电源；
+ *        ⑦ `sys_is_homed = false`（零点失效，重新上电必须重新回零）；
+ *        ⑧ 三色灯回待机黄色。
+ *        与 KWQ1 的 `SET POWER OFF`（`resetAllSubStateMachines` +
+ *        `clearAllTaskState`）行为对齐，目的是"断电后不留任何会复活的标志位"。
  */
 static bool cmdPower(const char *args, int seq)
 {
@@ -324,19 +353,32 @@ static bool cmdPower(const char *args, int seq)
         cmd_power_off = false;
         sysPoweronoFF(1);
         sendWithCRC("OK @%d POWER ON", seq);
-        /* 先回复上位机，再启动初始化，保证 ACK 不被初始化耗时拖延。 */
-        SysInit_Run();
+
+        /*
+         * 先回复上位机，再启动初始化，保证 ACK 不被初始化耗时拖延。
+         *
+         * 但若任务序列仍在运行（例如上位机在电源已开的情况下又发了一次
+         * `SET POWER ON`），就**跳过**系统初始化：否则 SysInit 会去启动整机
+         * 回零，与序列并行抢电机。正常流程（POWER OFF → POWER ON）下序列已被
+         * `SET POWER OFF` 停掉并清空，不会走到这个分支。
+         */
+        if (EmmTaskSeq_IsActive()) {
+            Serial.println("[初始化] 任务序列正在运行，本次 SET POWER ON 跳过系统初始化");
+        } else {
+            SysInit_Run();
+        }
         return true;
     }
     if (strstr(args, "OFF"))
     {
-        cmd_power_off = true;
-        /* 断电前先广播停止所有 EMM 电机，避免结构断电时电机仍在运动。 */
-        if (Rs485Bus_Take(500)) {
-            gEmm.stopBroadcast(false);
-            Rs485Bus_Give();
-        }
-        sysPoweronoFF(0);
+        /*
+         * 断电统一收尾：停一切复合动作 → 复位所有瞬态标志/状态位 → 广播停机
+         * → 断结构电源 → 清零点标志 → 黄灯待机。具体顺序见 sysPowerOffCleanup()
+         * 的文档。它与"指令超时休眠"（main.cpp::checkPCAlive）共用同一份逻辑，
+         * 避免两条路径各自维护收尾步骤而逐渐走偏。
+         */
+        sysPowerOffCleanup();
+
         sendWithCRC("OK @%d POWER OFF", seq);
         return true;
     }
@@ -345,18 +387,168 @@ static bool cmdPower(const char *args, int seq)
 }
 
 /**
- * @brief 获取系统状态（命令保留，实现待补）。
- * @details 原 KWQ1 的 GET STATUS 返回 XYZ 坐标、序列状态与任务进度；这些数据源
- *          在 KWQ3 中已移除。此处保留命令名以兼容旧上位机，具体实现将在后续
- *          增加复合回零与任务序列时补充。
- * @todo 复合回零 / 任务序列实现完成后，在此返回 EMM 电机与外设状态。
+ * @brief 获取系统状态。
+ * @cmd   GET STATUS
+ * @details 回复格式与 KWQ1 保持一致，便于上位机沿用同一套解析：
+ *
+ *            OK @<seq> STATUS=<序列状态> STEP_PWR=<结构电源> CUR=<当前任务序号>
+ *                       TOTAL=<队列总数> HOMING=<是否已回零>
+ *
+ *          字段含义：
+ *            - STATUS  ：序列运行状态（`SeqState`，0=停止 1=运行 2=暂停 …）。
+ *                        由 L2 执行引擎 `EmmTaskSeq` 推进；队列未启动时为 0（`STOPPED`）。
+ *            - STEP_PWR：结构电源是否已合上。`cmd_power_off` 为 true 表示软件
+ *                        断电（SET POWER OFF 或指令超时休眠），此时回 0。
+ *            - CUR     ：当前执行到第几条（1 基，与 KWQ1 一致）；队列为空时回 0。
+ *            - TOTAL   ：队列总条数。
+ *            - HOMING  ：整机是否已完成回零（`sys_is_homed`），1=已回零。
  */
 static bool cmdGetStatus(const char *args, int seq)
 {
     (void)args;
     cmd_on_line = true;
     lasCmdTime = millis();
-    sendWithCRC("OK @%d STATUS=NA", seq);
+
+    const uint8_t total = EmmTaskQueue_Count();
+    /* KWQ1 的 CUR 是 1 基；队列为空时回 0，避免上位机显示成"第 1/0 条"。 */
+    const uint8_t cur = (total == 0) ? 0 : (uint8_t)(EmmTaskQueue_Index() + 1);
+
+    sendWithCRC("OK @%d STATUS=%d STEP_PWR=%d CUR=%d TOTAL=%d HOMING=%d",
+                seq,
+                (int)EmmTaskQueue_GetSeqState(),
+                cmd_power_off ? 0 : 1,
+                (int)cur,
+                (int)total,
+                sys_is_homed ? 1 : 0);
+    return true;
+}
+
+/**
+ * @brief 添加一条循环任务到队尾。
+ * @cmd   SEQ ADD <c>=<A> T=<T>
+ * @details 例：`SEQ ADD A=01 T=30` —— 类型 A、样品盘工位 01、时间 30 分钟。
+ *
+ *          字段说明：
+ *            - `<c>`  任务类型，只接受 `A` / `B`（大写）；
+ *            - `<A>`  样品盘工位号，1~10（对应 4 号样品盘电机）；
+ *            - `T`    时间，单位**分钟**，必须 > 0，命令层**不设上限**
+ *                     （序列引擎侧有 30 分钟兜底，超过按 30 分钟处理）。
+ *
+ *          `T` 的作用位置（2026/10/14 用户确认）：**3 号下降到检测位后、抬回
+ *          安全高度 2 之前的停留时长**；取样位下降到取样点后**不再等待**。
+ *
+ *          与 KWQ1 的三点差异（用户确认，见《修改日志.md》§七）：
+ *            1. 取消 `S`（速度）字段与 `S*T` 校验——KWQ3 没有注射泵，
+ *               `S*T`（抽取体积）没有物理含义，故整条链去掉；
+ *            2. 命令只认新格式 `T=`，**不兼容**旧的 `S=<x> T=<y>` 写法；
+ *            3. 队列上限由 36 条收紧到 10 条，满时回 `TASK_FULL`，而不是
+ *               像 KWQ1 那样"静默丢弃但仍回 OK"。
+ *
+ *          校验顺序与回复（错误码定义见 `crc16.h`）：
+ *            ① 结构电源断电   → `ERR @n 109`（NO_STEP_PWR）
+ *            ② 参数格式不对   → `ERR @n 102`（PARAM_ERR）
+ *            ③ 类型/工位越界  → `ERR @n 102`（PARAM_ERR）
+ *            ④ `T <= 0`       → `ERR @n 111`（ST_PARAM_ERR）
+ *            ⑤ 队列已满       → `ERR @n 114`（TASK_FULL）
+ *            ⑥ 通过           → 入队并回 `OK @n SEQ ADD`
+ *
+ * @note 本命令只写内存队列、不触发任何运动，因此**不受**整机回零的运行期
+ *       互锁限制：回零过程中允许继续编排队列。
+ */
+static bool cmdSeqAdd(const char *args, int seq)
+{
+    cmd_on_line = true;
+    lasCmdTime = millis();
+
+    /* ① 结构电源必须已合上：没电时编排队列没有意义，与 KWQ1 行为一致。 */
+    if (cmd_power_off) {
+        Serial.println("[任务序列] SEQ ADD 被拒绝：结构电源未接通");
+        sendWithCRC("ERR @%d %d", seq, NO_STEP_PWR);
+        return false;
+    }
+
+    char  type = '\0';
+    int   slot = -1;
+    float t    = -1.0f;
+
+    /*
+     * ② 解析 `A=01 T=30` 形态。
+     *    dispatch() 已剥掉命令名后的空格，因此这里直接按 "%c=%d T=%f" 解析：
+     *    `%c` 取类型字母，`%d` 取工位号（前导零自动忽略，01 与 1 等价）。
+     *    只认 `T=`：旧的 `S=<x> T=<y>` 会在此判为格式错误。
+     */
+    if (sscanf(args, "%c=%d T=%f", &type, &slot, &t) != 3) {
+        Serial.printf("[任务序列] SEQ ADD 参数格式错误：\"%s\"（应为 <c>=<A> T=<T>）\n",
+                      args);
+        sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+        return false;
+    }
+
+    /* ③ 类型与工位范围校验。 */
+    if ((type != 'A' && type != 'B') ||
+        (slot < (int)EMM_TASK_SLOT_MIN || slot > (int)EMM_TASK_SLOT_MAX)) {
+        Serial.printf("[任务序列] SEQ ADD 参数越界：类型=%c 工位=%d（类型须 A/B，工位须 %u~%u）\n",
+                      type, slot,
+                      (unsigned)EMM_TASK_SLOT_MIN, (unsigned)EMM_TASK_SLOT_MAX);
+        sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+        return false;
+    }
+
+    /* ④ 时间必须为正；按需求 T 不设上限，故只挡 <= 0。 */
+    if (!(t > 0.0f)) {
+        Serial.printf("[任务序列] SEQ ADD 时间非法：T=%.3f min（必须 > 0）\n", (double)t);
+        sendWithCRC("ERR @%d %d", seq, ST_PARAM_ERR);
+        return false;
+    }
+
+    /* ⑤ 队列满：回明确错误（KWQ1 是静默丢弃但仍回 OK，此处已修正）。 */
+    if (EmmTaskQueue_IsFull()) {
+        Serial.printf("[任务序列] SEQ ADD 被拒绝：队列已满（%u/%u）\n",
+                      (unsigned)EmmTaskQueue_Count(),
+                      (unsigned)EmmTaskQueue_Capacity());
+        sendWithCRC("ERR @%d %d", seq, TASK_FULL);
+        return false;
+    }
+
+    /* ⑥ 入队（模块内部会打印"已添加第 N 条"日志）。 */
+    if (!EmmTaskQueue_Add(type, (uint8_t)slot, t)) {
+        /* 理论上不会走到这里：上面的校验已覆盖全部失败原因。 */
+        Serial.println("[任务序列] SEQ ADD 入队失败（模块内部校验未通过）");
+        sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+        return false;
+    }
+
+    sendWithCRC("OK @%d SEQ ADD", seq);
+    return true;
+}
+
+/**
+ * @brief 清空任务队列。
+ * @cmd   SEQ CLEAR
+ * @details 把队列长度与执行索引归零，不触发任何运动。
+ *          序列正在运行或暂停时拒绝清空，回复 `ERR @n 110`（SEQ_RUNNING）；
+ *          需要停止请先发 `SEQ STOP`。
+ * @note KWQ1 在 PAUSED 下会把队列截断成"当前条 + 1"（保留正在跑的那条），
+ *       KWQ3 简化为"运行/暂停一律拒绝"，语义更直观；如需恢复 KWQ1 的截断行为，
+ *       改动点仅在本函数。
+ */
+static bool cmdSeqClear(const char *args, int seq)
+{
+    (void)args;
+    cmd_on_line = true;
+    lasCmdTime = millis();
+
+    /* 序列执行中（RUNNING / PAUSED）不允许清空，避免游标与队列不一致。 */
+    if (EmmTaskSeq_IsActive()) {
+        Serial.printf("[任务序列] SEQ CLEAR 被拒绝：序列状态 %s\n",
+                      EmmTaskQueue_SeqStateToStr(EmmTaskQueue_GetSeqState()));
+        sendWithCRC("ERR @%d %d", seq, SEQ_RUNNING);
+        return false;
+    }
+
+    EmmTaskQueue_Clear();   /* 内部会打印"已清空：原有 N 条"日志。 */
+
+    sendWithCRC("OK @%d SEQ CLEARED", seq);
     return true;
 }
 /**
@@ -3323,4 +3515,117 @@ static bool cmdSetRESTART(const char *args, int seq){
     
     ESP.restart();
     return true;
+}
+
+/* ==========================================================================
+ * 断电 / 休眠统一收尾
+ *
+ * 对应 KWQ1 `SET POWER OFF` 里的 `resetAllSubStateMachines()` +
+ * `clearAllTaskState()`：断电必须把**所有会残留到下一次上电**的标志位/状态位
+ * 清干净，否则会出现"上一轮的复合动作在新一轮上电后复活"（实机已复现：
+ * 任务序列在 POWER OFF→POWER ON 后继续运行，与初始化/回零混在一起）。
+ *
+ * KWQ3 是四层架构、每个复合动作一个独立后台任务，和 KWQ1 的"单任务轮询
+ * 状态机"结构不同，因此复位方式分两类：
+ *   - 纯软件状态（序列/队列/零点/诊断表）：直接清零；
+ *   - 正在运行的机械动作（回零/初始化）：**只请求中止**，由各自的后台任务在
+ *     动作边界干净退出并自清占用标志。绝不在这里强制清它们的 busy 门闩——
+ *     后台任务不会因此停下，而新的启动又能立刻放行，会造成两套流程并行驱动
+ *     同一批电机（比原问题更严重）。
+ * ========================================================================== */
+
+/**
+ * @brief 清空 EMM 回零异步状态跟踪表。
+ * @details 该表是按电机地址索引的诊断记录（256 槽），记录"回零中/等待同步"
+ *          等临时状态，断电后已无意义。表由 `s_emmHomeTrackMutex` 保护，
+ *          后台监控任务可能并发读写，因此必须持锁清零；取锁失败时跳过本次清零
+ *          （宁可漏清一次，也不与监控任务抢锁）。
+ */
+static void emmHomeTracksResetAll(void)
+{
+    if (s_emmHomeTrackMutex == nullptr) {
+        return;
+    }
+    if (xSemaphoreTake(s_emmHomeTrackMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        Serial.println("[断电] 回零跟踪表正被占用，本次跳过清零");
+        return;
+    }
+    memset(s_emmHomeTracks, 0, sizeof(s_emmHomeTracks));
+    xSemaphoreGive(s_emmHomeTrackMutex);
+}
+
+/**
+ * @brief 复位所有"断电后必须归零"的复合动作与瞬态标志/状态位。
+ * @details 按模块逐个复位，顺序为"先停动作、再清状态"：
+ *            1) 任务序列 / 队列：`EmmTaskSeq_Stop()`
+ *               —— 置 `STOPPED`、清空队列、复位执行状态机（等价 KWQ1
+ *                  `clearAllTaskState()`）；
+ *            2) 整机回零：`EmmSystemHome_RequestStop()`
+ *               —— 请求中止，回零任务在步骤边界退出并自清 `busy`；
+ *            3) 系统初始化：`SysInit_Abort()`
+ *               —— 请求中止，初始化任务在检查点退出并自清 `busy`；
+ *            4) 本文件内部瞬态：回零跟踪表 / 升降过流计时 / 升降监控布防。
+ *
+ *          全局零点标志 `sys_is_homed` 由调用方 `sysPowerOffCleanup()` 统一清零。
+ *
+ * @note 明确**不**复位的量（属通信状态或用户设置，与结构电源无关）：
+ *       `ping_on_line` / `cmd_on_line` / `lasCmdTime` / `lastPingTime`、
+ *       `driverTemp[]` / `max_temp` / `ryg_voltage`，以及 RS485 互斥锁与
+ *       各后台任务句柄。
+ */
+static void emmResetTransientFlags(void)
+{
+    /* 1) 任务序列：停序列 + 清队列 + 复位执行状态机。 */
+    EmmTaskSeq_Stop();
+
+    /* 2) 整机回零：请求中止（不强制清 busy，交给回零任务收尾）。 */
+    EmmSystemHome_RequestStop();
+
+    /* 3) 系统初始化：请求中止（不强制清 busy，交给初始化任务在检查点收尾）。 */
+    SysInit_Abort();
+
+    /* 4) 本文件内部瞬态。 */
+    emmHomeTracksResetAll();
+    s_emmLiftOverCurrentSince = 0;
+    if (s_emmLiftMonitorArmed) {
+        /*
+         * 结构电源已断，升降电机不可能再运动，继续布防只会让监控任务空转
+         * 轮询一个已断电的驱动器。这里显式撤防；重新上电后需由上位机重新
+         * 下发 `SET EMM LIFT MONITOR ARM=1`。
+         */
+        EmmLiftCurrentMonitor_Arm(false);
+    }
+}
+
+void sysPowerOffCleanup(void)
+{
+    Serial.println("[断电] ========== 断电收尾：复位所有复合动作与瞬态状态 ==========");
+
+    /* 断电状态标志先置位：让各状态机的"电源兜底守卫"也能看到。 */
+    cmd_power_off = true;
+
+    /* ① 先停掉一切复合动作并复位瞬态状态。 */
+    emmResetTransientFlags();
+
+    /* ② 广播停止所有 EMM 电机，避免结构断电时电机仍在运动。 */
+    if (Rs485Bus_Take(500)) {
+        gEmm.stopBroadcast(false);
+        Rs485Bus_Give();
+    } else {
+        Serial.println("[断电] 获取 RS485 总线失败，跳过广播停机");
+    }
+
+    /* ③ 断开结构电源。 */
+    sysPoweronoFF(0);
+
+    /*
+     * ④ 断电后零点失效：重新上电必须重新回零（与 KWQ1 一致）。否则
+     *    `sys_is_homed` 会残留上一次的"已回零"，让 `SEQ START` 误放行。
+     */
+    sys_is_homed = false;
+
+    /* ⑤ 三色灯回到待机黄色（断电待机态）。 */
+    rygLedOn(RYG_COLOR_YELLOW);
+
+    Serial.println("[断电] ========== 断电收尾完成 ==========");
 }
