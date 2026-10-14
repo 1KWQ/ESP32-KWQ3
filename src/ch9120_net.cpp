@@ -8,18 +8,173 @@
 #include "driver_ch9120_interface.h"
 #include "exio.h"
 
+#include <stdarg.h>
+#include <string.h>
+
+#include "esp_log.h"
+
 /*
- * CH9120 shares the default Serial with the PC command channel.  Do not write
- * diagnostic text to Serial here: while the chip is in configuration mode it
- * would be interpreted as a CH9120 command, and in normal mode it would be
- * mistaken for an application response.  Keep the status hook deliberately
- * quiet; the configuration result is available through Ch9120Net_IsTcpConnected().
+ * CH9120 的串口侧接在默认 Serial（UART0）上，与上位机命令通道共用同一条字节流。
+ * 因此"配置期间"必须保证 UART0 上只有 CH9120 的配置帧，任何其它输出都会污染它：
+ *
+ *   - 本模块自己的日志：配置期间只攒进 s_cfg_log_buf，不写 Serial；
+ *   - ESP_LOG（含其它任务与 ESP-IDF 驱动，例如 exio 的温度日志、ledc 的报错）：
+ *     main.cpp 里的 Serial.setDebugOutput(true) 会把 ESP_LOG 也引到 UART0，
+ *     所以配置期间用 esp_log_set_vprintf() 把它一并拦进同一个缓冲。
+ *   - 配置结束后恢复 ESP_LOG，并把缓冲内容一次性打印出来（便于定位失败步骤）。
+ *
+ * 参考：工程 D:\ESP32S3_YiYaoSizhouLiShaoJie_AddRealy 的网口能连通，正是因为它
+ * 在 setup() 里调了 WiFiLog_Init()，用 esp_log_set_vprintf() 把 ESP_LOG 从 UART0
+ * 上摘走了；KWQ3 没有那个模块，ESP_LOG 便顺着 UART0 灌进了 CH9120 的配置帧。
+ *
+ * 正常透传期间（s_is_configuring==false）日志直接写 Serial：会随透传一起到上位机，
+ * 与固件其它 Serial.printf 同流（上位机按协议忽略非 OK/ERR/EVT 行）。
+ */
+
+/** @brief 配置期日志缓冲大小（含本模块日志与被拦下的 ESP_LOG）。 */
+#define CH9120_NET_CFG_LOG_BUF_SIZE 2048U
+
+static char s_cfg_log_buf[CH9120_NET_CFG_LOG_BUF_SIZE]; /**< 配置期日志缓冲 */
+static size_t s_cfg_log_len = 0U;                       /**< 缓冲已用长度 */
+static bool s_cfg_log_truncated = false;                /**< 缓冲写满标志 */
+static vprintf_like_t s_saved_log_vprintf = NULL;       /**< 被替换前的 ESP_LOG 输出回调 */
+
+/**
+ * @brief 向配置期日志缓冲追加一段文本。
+ *
+ * @param text 待追加的字符串（NULL 或空串直接忽略）。
+ *
+ * @details 缓冲写满时只置截断标志，不覆盖已有内容、更不写 Serial。
+ */
+static void Ch9120Net_CfgLogAppend(const char *text)
+{
+    size_t len;
+
+    if (text == NULL)
+    {
+        return;
+    }
+
+    len = strlen(text);
+    if (len == 0U)
+    {
+        return;
+    }
+
+    if ((s_cfg_log_len + len) < sizeof(s_cfg_log_buf))
+    {
+        memcpy(&s_cfg_log_buf[s_cfg_log_len], text, len);
+        s_cfg_log_len += len;
+        s_cfg_log_buf[s_cfg_log_len] = '\0';
+    }
+    else
+    {
+        s_cfg_log_truncated = true;
+    }
+}
+
+/**
+ * @brief 配置期间接管 ESP_LOG 的输出回调。
+ *
+ * @param fmt printf 风格格式化字符串。
+ * @param args 可变参数列表。
+ * @return int 格式化后的长度。
+ *
+ * @details
+ * 该函数可能被任意任务/核上的 ESP_LOGx 调用。它只做一次 vsnprintf 加缓冲追加，
+ * **绝不写 Serial** —— 这正是"配置期间 UART0 上只允许有 CH9120 配置帧"的关键。
+ * 配置结束后由 Ch9120Net_ApplyConfig() 用 esp_log_set_vprintf() 恢复原回调。
+ */
+static int Ch9120Net_CfgLogVprintf(const char *fmt, va_list args)
+{
+    char tmp[160];
+    int n;
+
+    if (fmt == NULL)
+    {
+        return 0;
+    }
+
+    n = vsnprintf(tmp, sizeof(tmp), fmt, args);
+    if (n > 0)
+    {
+        Ch9120Net_CfgLogAppend(tmp);
+    }
+
+    return n;
+}
+
+/**
+ * @brief 本模块的诊断日志输出（所有 WiFiLog_Statusf 都走这里）。
+ *
+ * @param fmt printf 风格格式化字符串。
+ *
+ * @details
+ * - 配置期间：只进缓冲（s_cfg_log_buf），不写 Serial；
+ * - 非配置期：直接写 Serial。
  */
 static void Ch9120Net_Logf(const char *fmt, ...)
 {
-    (void)fmt;
+    char line[192];
+    va_list args;
+
+    if (fmt == NULL)
+    {
+        return;
+    }
+
+    va_start(args, fmt);
+    (void)vsnprintf(line, sizeof(line), fmt, args);
+    va_end(args);
+
+    if (Ch9120Net_IsConfiguring())
+    {
+        Ch9120Net_CfgLogAppend(line);
+
+        return;
+    }
+
+    Serial.print(line);
 }
 #define WiFiLog_Statusf Ch9120Net_Logf
+
+/**
+ * @brief 清空配置期日志缓冲（每次开始配置前调用）。
+ */
+static void Ch9120Net_CfgLogReset(void)
+{
+    s_cfg_log_len = 0U;
+    s_cfg_log_buf[0] = '\0';
+    s_cfg_log_truncated = false;
+}
+
+/**
+ * @brief 把配置期缓冲的日志一次性打印出来。
+ *
+ * @details
+ * 必须在配置结束、ESP_LOG 回调已恢复、Serial 已回到 115200 之后再调用。
+ */
+static void Ch9120Net_CfgLogFlush(void)
+{
+    if ((s_cfg_log_len == 0U) && !s_cfg_log_truncated)
+    {
+        return;
+    }
+
+    Serial.println();
+    Serial.println(F("[CH9120_NET] ===== 配置期日志 begin ====="));
+    if (s_cfg_log_len > 0U)
+    {
+        Serial.print(s_cfg_log_buf);
+    }
+    if (s_cfg_log_truncated)
+    {
+        Serial.println(F("[CH9120_NET] ...（缓冲已满，后续日志被丢弃）"));
+    }
+    Serial.println(F("[CH9120_NET] ===== 配置期日志 end ====="));
+
+    Ch9120Net_CfgLogReset();
+}
 
 
 /**
@@ -29,8 +184,17 @@ static void Ch9120Net_Logf(const char *fmt, ...)
  * 只有当该版本号变化，或者 `CH9120_NET_FORCE_CONFIG` 被置 1 时，程序才会
  * 重新写 CH9120 EEPROM。这样可以减少 EEPROM 重复擦写，也能在修改 IP/端口
  * 后通过递增版本号触发重新配置。
+ *
+ * @note 2026/10/10：KWQ3 首次启用 CH9120 透传时把版本号由 1 提升到 2，
+ *       确保已烧录过旧版本的板子也会重新写入一次网络参数。
+ * @note 2026/10/14：服务器地址由 192.168.254.179 更正为 192.168.254.10，但当时
+ *       忘了把版本号跟着 +1（仍是 2）→ 开机时 NVS 里存的版本号也是 2
+ *       → `Ch9120Net_NeedConfig()` 判定 need_config=0 → 直接
+ *       "skip EEPROM write"，新地址**根本没写进芯片**（板子仍去连 .179，
+ *       所以 PC 改成 TCP Server 监听 .10:50000 也等不到连接）。
+ *       这次提升到 3，强制重写一次 EEPROM，把 .10 真正写进芯片。
  */
-#define CH9120_NET_CONFIG_VERSION 1U
+#define CH9120_NET_CONFIG_VERSION 3U
 
 /**
  * @brief 是否每次启动都强制写入 CH9120 配置。
@@ -38,6 +202,11 @@ static void Ch9120Net_Logf(const char *fmt, ...)
  * @details
  * 调试 CH9120 网络参数时可以临时改成 1；正式使用建议保持 0，避免每次启动
  * 都写 EEPROM。
+ *
+ * @note 2026/10/14：排查"改了 IP 却不生效"期间曾**临时置 1**，配合 `config start`
+ *       日志新增的 `code_ver` / `nvs_ver` 判断写入情况。结论已明确
+ *       （写入一直正常；连不上的真正原因是 **PC 侧 Windows 防火墙拦了 50000 入站**），
+ *       故**已改回 0**。日后需要再次强制重写时，临时置 1 即可。
  */
 #define CH9120_NET_FORCE_CONFIG 0
 
@@ -108,7 +277,7 @@ static uint8_t s_gateway[4] = {192, 168, 254, 1};
 static uint16_t s_local_port = 5000;
 
 /** @brief TCP Client 模式下要连接的服务器 IP。 */
-static uint8_t s_server_ip[4] = {192, 168, 254, 179};
+static uint8_t s_server_ip[4] = {192, 168, 254, 10};
 
 /** @brief TCP Client 模式下要连接的服务器端口。 */
 static uint16_t s_server_port = 50000;
@@ -284,6 +453,34 @@ static void Ch9120Net_GpioInit(void)
 }
 
 /**
+ * @brief 读取 NVS 中已保存的 CH9120 配置版本号。
+ *
+ * @return uint32_t 已保存的版本号；`0` 表示从未成功写入过。
+ *
+ * @details
+ * 仅供诊断打印（2026/10/14 排查"改了 IP 却不生效"时加入）。
+ * 把 NVS 里存的版本号与固件里编译进去的 `CH9120_NET_CONFIG_VERSION` 一起打进日志，
+ * 就能一眼看出"上一轮到底写没写成功"：
+ * - 两者相等 → 之前写成功过（芯片里应已是新参数）；
+ * - 两者不等 → 本次会触发重写。
+ */
+static uint32_t Ch9120Net_ReadSavedVersion(void)
+{
+    Preferences preferences;
+    uint32_t saved_version = 0U;
+
+    if (!preferences.begin("ch9120", true))
+    {
+        return 0U;
+    }
+
+    saved_version = preferences.getUInt("cfg_ver", 0);
+    preferences.end();
+
+    return saved_version;
+}
+
+/**
  * @brief 判断是否需要重新写 CH9120 EEPROM。
  *
  * @return true 需要重新配置。
@@ -442,13 +639,26 @@ static bool Ch9120Net_ApplyConfig(bool force_config, const char *source)
     bool config_ok = true;
     bool need_config = force_config || Ch9120Net_NeedConfig();
 
+    /*
+     * 关键（2026/10/14 定位到）：配置期间 UART0 上只能有 CH9120 的配置帧。
+     * main.cpp 的 Serial.setDebugOutput(true) 把 ESP_LOG 也引到了 UART0，而
+     * exIOInit() 创建的 pollInterruptTask 每 2s 会打印驱动温度日志、ledc 也会在
+     * LEDC 未初始化时报错；这些文本一旦在配置期间发出，就会被 CH9120 当成配置
+     * 数据，导致芯片不回应答 0xAA、ch9120_basic_config 直接失败。
+     * 处理：配置期间把 ESP_LOG 回调换成"只进缓冲"的实现，配置结束后恢复并打印。
+     */
+    Ch9120Net_CfgLogReset();
     s_is_configuring = true;
+    s_saved_log_vprintf = esp_log_set_vprintf(Ch9120Net_CfgLogVprintf);
+
     Ch9120Net_GpioInit();
 
-    WiFiLog_Statusf("[CH9120_NET] config start, source=%s, force=%d, need_config=%d\r\n",
+    WiFiLog_Statusf("[CH9120_NET] config start, source=%s, force=%d, need_config=%d, code_ver=%u, nvs_ver=%u\r\n",
                     source_text,
                     force_config ? 1 : 0,
-                    need_config ? 1 : 0);
+                    need_config ? 1 : 0,
+                    (unsigned)CH9120_NET_CONFIG_VERSION,
+                    (unsigned)Ch9120Net_ReadSavedVersion());
 
     if (need_config)
     {
@@ -483,6 +693,18 @@ static bool Ch9120Net_ApplyConfig(bool force_config, const char *source)
 
     Ch9120Net_RestoreWorkMode();
     s_is_configuring = false;
+
+    /*
+     * 配置结束：先恢复 ESP_LOG 的输出回调（回到 UART0），再把配置期间缓冲的日志
+     * 一次性打出来。此时 Serial 已恢复 115200，CH9120 也已回到正常透传模式，
+     * 所以这些文本不会再污染配置帧。
+     */
+    if (s_saved_log_vprintf != NULL)
+    {
+        (void)esp_log_set_vprintf(s_saved_log_vprintf);
+    }
+    s_saved_log_vprintf = NULL;
+    Ch9120Net_CfgLogFlush();
 
     /**
      * @brief 下次轮询强制打印 TCPCS 状态。
