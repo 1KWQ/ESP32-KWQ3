@@ -230,6 +230,19 @@
  *       （回收位 vs 复位），故单独定义。
  */
 #define EMM_SEQ_LIFT_POS_RESET         2000U
+
+/**
+ * @brief "3 号确实停在安全高度"的核对容差（**驱动器计数**）。
+ * @details **2026/10/27 新增**。用于 `emmSeqLiftSafeBeforeRotate()` 的读回核对。
+ *          取 1/8 圈 = 8192 计数 ≈ 400 脉冲：
+ *            - 比闭环静差（几十计数）大得多，不会被正常静差误判；
+ *            - 比相邻点位间距（≥5000 脉冲）小得多，不会把"其实在检测位 26000"
+ *              当成"已在安全高度"。
+ *          ⚠️ 单位必须注意：`0x43` 读回的是**计数**（65536/圈），而点位宏是**脉冲**
+ *          （3200/圈），相差 20.48 倍。核对前必须用 `emmJudgePulseToCounts()` 换算。
+ */
+#define EMM_SEQ_LIFT_SAFE_TOL_COUNTS   8192L
+
 /*
  * ⚠️ 3 号（升降）的 5 个可调点位也已**移出本文件**（2026/10/20），改为运行期可改参数：
  *      EMM_SEQ_LIFT_POS_SAMPLE_1 / SAMPLE_2 / DETECT / DISCARD_2 / DISCARD_3
@@ -407,20 +420,12 @@ static volatile bool s_endInterrupt = false;
  */
 static bool s_sampleTaken = false;
 
-/**
- * @brief 下一次进入回收阶段时，是否需要**先把 3 号抬到安全高度**。
- * @details **2026/10/26 新增**，只为 `END CUR` / `END ALL` 服务。
- *
- *          正常路径（检测位 → 回收位）在进入回收前，3 号已经被检测阶段抬回
- *          安全高度（5000），所以回收的第一步"旋转至回收位"是安全的。
- *          但 `END` 是**从任意阶段中途切入**的：可能正卡在取样下降（探头在样品里）、
- *          或检测位停留（探头在检测高度 26000）。此时直接执行"旋转至回收位"
- *          会**带着探头撞样品盘**。
- *
- *          因此由 END 路径置位本标志，`emmSeqRunDiscardPos()` 开头先做一次
- *          "抬到安全高度"，做完清标志；正常路径不受影响（标志为 false，不多走一步）。
+/*
+ * 注：2026/10/26 曾有一个 `s_discardLiftFirst` 标志，用来表示"下一次进回收要先抬
+ * 3 号到安全高度"，只在 `END` 中途切入时置位。**2026/10/27 已删除** ——
+ * `emmSeqRunDiscardPos()` 改成**无条件**先走 `emmSeqLiftSafeBeforeRotate()` 读回核对，
+ * 不再需要这个标志；留着它会让人误以为"把它置 false 就能跳过抬升"。
  */
-static bool s_discardLiftFirst = false;
 
 /* ---------------- 归位式暂停（2026/10/27 新增） ---------------- */
 
@@ -807,7 +812,6 @@ static void emmTaskSeqResetPhase(void)
     s_endMode = SEQ_END_NONE;
     s_endInterrupt = false;
     s_sampleTaken = false;
-    s_discardLiftFirst = false;
     /*
      * **2026/10/27**：`SEQ PAUSE` 的两个标志同理必须清掉。否则"按了暂停但序列
      * 被 `SEQ STOP` / 断电收尾先一步打断"时，残留的请求会让下一次 `SEQ START`
@@ -1015,7 +1019,6 @@ static void emmSeqHandleStepFailure(const char *label, const char *reason)
         }
 
         Serial.printf("[任务序列] %s 被 END 打断：不按失败收尾，转入回收流程\n", label);
-        s_discardLiftFirst = true;   /* 探头可能还在低位，回收前先抬到安全高度 */
         emmTaskSeqEnterPhase(TASK_DISCARD_POS);
         return;
     }
@@ -1058,7 +1061,6 @@ static void emmSeqHandleStepFailure(const char *label, const char *reason)
         }
 
         Serial.printf("[任务序列] %s 被 PAUSE 打断：已取到样，先回收再归位\n", label);
-        s_discardLiftFirst = true;   /* 探头可能还在低位，回收前先抬到安全高度 */
         emmTaskSeqEnterPhase(TASK_DISCARD_POS);
         return;
     }
@@ -1732,6 +1734,87 @@ static bool emmSeqMoveStep(uint8_t addr, uint8_t dir, uint16_t rpm, uint8_t acc,
         return false;
     }
     return emmSeqWaitArriveAll(rpm, acc, label);
+}
+
+/**
+ * @brief **旋转前的硬保险**：确认 3 号**真的**停在安全高度，不在就先抬过去再核对。
+ *
+ * @details **2026/10/27 新增**。用户要求："我需要先回到安全高度，才能去回收位回收"。
+ *
+ *          ## 为什么要"读回核对"，而不是直接发一条绝对定位就完事
+ *          `emmSeqMoveStep()` 的到位判据是 `emmArriveReached()`：
+ *          `realtimeRpm == 0 && Prf_TF 置位`。而 **`Prf_TF` 是驱动器上一次定位
+ *          留下的标志**，一条停着的轴（如 3 号在检测位停留）它本来就是 1；
+ *          `realtimeRpm == 0` 对停着的轴更是恒成立。于是：
+ *            - 若抬升命令因故没真正让 3 号动起来（刚广播停机后驱动器还没准备好等），
+ *              第一次轮询就会看到"转速 0 + Prf_TF 1" → **立刻判到位** → 返回 true；
+ *            - 紧接着 2 号带着探头旋转，再下压到回收位 37000。
+ *          实机现象就是"没看到抬升、转一下就往下压"。
+ *
+ *          本函数不信任那个标志：先读 `0x43` 的**实际位置**，与安全高度换算后的
+ *          计数比对；不在容差内就重发一次绝对定位，再读；两次都不达标就**判失败、
+ *          绝不旋转**（宁可停机报错，也不能带着探头转）。
+ *
+ * @param label   本步中文说明（日志用，必须指向静态存储）
+ * @param safePos 目标"安全位置"（**命令脉冲**，如安全高度 5000 / 复位高度 2000）
+ * @param rpm     抬升转速（回收 180、暂停归位 120、复位 100，各自沿用原值）
+ * @param acc     抬升加速度字段
+ * @return true 已确认在安全位置，可以旋转；false 抬不上去 / 读不到位置（禁止旋转）。
+ */
+static bool emmSeqLiftSafeBeforeRotate(const char *label, uint32_t safePos,
+                                       uint16_t rpm, uint8_t acc)
+{
+    const int32_t targetCounts = emmJudgePulseToCounts(safePos);
+
+    /*
+     * 最多 3 轮：读 → (不在就抬) → 读 → (不在就抬) → 读。
+     * 最后一轮**只核对、不再发命令**，避免"抬完还没读就判失败"。
+     * 总计最多发 2 次抬升命令、读 3 次位置。
+     */
+    for (uint8_t attempt = 0; attempt < 3U; ++attempt) {
+        /* ---- 1. 读 3 号实际位置（单位：驱动器计数） ---- */
+        int32_t curCounts = 0;
+        bool readOk = false;
+        if (Rs485Bus_Take(EMM_TASK_SEQ_BUS_TIMEOUT_MS)) {
+            EmmV5::SystemState st = {};
+            if (gEmm.readSystemState(EMM_LIFT_MOTOR, st,
+                                     EMM_TASK_SEQ_CMD_TIMEOUT_MS) == EmmV5::STATUS_OK) {
+                curCounts = st.realtimePosition;
+                readOk = true;
+            }
+            Rs485Bus_Give();
+        }
+        if (!readOk) {
+            Serial.printf("[任务序列] %s：读不到 3 号位置，拒绝旋转（安全优先）\n", label);
+            return false;
+        }
+
+        /* ---- 2. 在容差内 → 真的在安全高度，放行 ---- */
+        const int32_t diff = curCounts - targetCounts;
+        if (diff >= -EMM_SEQ_LIFT_SAFE_TOL_COUNTS &&
+            diff <= EMM_SEQ_LIFT_SAFE_TOL_COUNTS) {
+            LOGD("[任务序列] %s：已确认 3 号在目标位置（%ld 计数），可以旋转\n",
+                 label, (long)curCounts);
+            return true;
+        }
+
+        /* ---- 3. 最后一轮只核对，不再发命令 ---- */
+        if (attempt >= 2U) {
+            break;
+        }
+
+        /* ---- 4. 不在 → 抬过去（下一轮再读一次核对） ---- */
+        Serial.printf("[任务序列] %s：3 号当前 %ld 计数，目标位置应为 %ld 计数"
+                      "（差 %ld），先抬回去再旋转\n",
+                      label, (long)curCounts, (long)targetCounts, (long)diff);
+        if (!emmSeqMoveStep(EMM_LIFT_MOTOR, 1U, rpm, acc,
+                            safePos, 1U, safePos, label)) {
+            return false;
+        }
+    }
+
+    Serial.printf("[任务序列] %s：两次抬升后 3 号仍不在目标位置，拒绝旋转\n", label);
+    return false;
 }
 
 /**
@@ -2508,19 +2591,21 @@ static SeqStepResult emmSeqRunDetectPos(const EmmTask &t)
 static SeqStepResult emmSeqRunDiscardPos(void)
 {
     /*
-     * **2026/10/26 新增**：从 `END CUR` / `END ALL` 中途切入时，3 号可能还在
-     * 取样/检测高度。必须先抬回安全高度，否则下面"旋转至回收位"会带着探头撞盘。
-     * 正常路径（检测位 → 回收位）进入前 3 号已在安全高度，标志为 false，不多走这一步。
-     * 用**绝对位置**（`MODE=1`）：目标已到位时驱动器直接回"未移动"，代价只有一帧。
+     * **2026/10/26 新增，2026/10/27 改为"读回核对"**：
+     * 从 `END CUR` / `END ALL` / `SEQ PAUSE` 中途切入时，3 号可能还在取样/检测
+     * 高度。必须先抬回安全高度，否则下面"旋转至回收位"会带着探头撞盘。
+     *
+     * ⚠️ 原来这里只在 `s_discardLiftFirst` 为真时才抬，且抬升靠 `emmSeqMoveStep()`
+     *    的 `Prf_TF` 判到位 —— 而 `Prf_TF` 是驱动器上一次定位的残留标志，
+     *    抬升命令没真正生效时会被**立刻误判成已到位**，接着 2 号就带着探头旋转、
+     *    再下压到回收位（实机已复现："没抬升就转、转完就下压"）。
+     *    现在**无条件**先走一次 `emmSeqLiftSafeBeforeRotate()`：读回实际位置核对，
+     *    不达标就重发，两次仍不达标直接失败，**绝不旋转**。
+     *    正常路径（检测位 4/4 已把 3 号抬到 5000）读回即通过，只多一帧 `0x43` 查询。
      */
-    if (s_discardLiftFirst) {
-        s_discardLiftFirst = false;
-        if (!emmSeqMoveStep(EMM_LIFT_MOTOR, 1U, 180U, 40U,
-                            EMM_SEQ_LIFT_POS_SAFE, 1U,
-                            EMM_SEQ_LIFT_POS_SAFE,
-                            "回收位 0/10 升降先回安全高度（END 中途切入）")) {
-            return SEQ_STEP_FAILED;
-        }
+    if (!emmSeqLiftSafeBeforeRotate("回收位 0/10 确认3号在安全高度",
+                                    EMM_SEQ_LIFT_POS_SAFE, 180U, 40U)) {
+        return SEQ_STEP_FAILED;
     }
 
     /*
@@ -2634,10 +2719,11 @@ static SeqStepResult emmSeqRunReset(void)
 
     /* 复位 1/3：3 号（升降电机）上升至 EMM_SEQ_LIFT_POS_RESET（2000）。
        参数沿用取样位下降的 DIR=1 / RPM=100 / ACC=20（用户确认"方向还是 DIR=1，
-       电机会根据脉冲走"）。 */
-    if (!emmSeqMoveStep(EMM_LIFT_MOTOR, 1U, 100U, 20U,
-                        EMM_SEQ_LIFT_POS_RESET, 1U, EMM_SEQ_LIFT_POS_RESET,
-                        "复位 1/3 3号上升至2000")) {
+       电机会根据脉冲走"）。
+       **2026/10/27**：与回收 0/10 一样改为"读回核对"——复位 2/3 要把 2 号转回
+       原点，必须确保 3 号真的抬上去了，不能只信 `Prf_TF` 残留标志。 */
+    if (!emmSeqLiftSafeBeforeRotate("复位 1/3 确认3号在安全位置",
+                                    EMM_SEQ_LIFT_POS_RESET, 100U, 20U)) {
         return SEQ_STEP_FAILED;
     }
 
@@ -2818,10 +2904,13 @@ static SeqStepResult emmSeqRunPausePark(void)
     switch (s_subStep) {
     /* ---- 1/2：3 号抬到安全高度（先抬，避免带探头旋转） ---- */
     case 0:
-        if (!emmSeqMoveStep(EMM_LIFT_MOTOR, 1U, 120U, 30U,
-                            EMM_SEQ_LIFT_POS_SAFE, 1U,
-                            EMM_SEQ_LIFT_POS_SAFE,
-                            "暂停归位 1/2 3号抬至安全高度")) {
+        /*
+         * **2026/10/27 改为"读回核对"**：与回收 0/10 同一个理由 —— 不信任 `Prf_TF`
+         * 残留标志，直接读 `0x43` 的实际位置确认 3 号真的在 5000 才允许 2/2 旋转。
+         * 转速沿用原来的 120/30（暂停归位比回收轻柔）。
+         */
+        if (!emmSeqLiftSafeBeforeRotate("暂停归位 1/2 确认3号在安全高度",
+                                        EMM_SEQ_LIFT_POS_SAFE, 120U, 30U)) {
             return SEQ_STEP_FAILED;
         }
         emmSeqNextStep();
@@ -2898,7 +2987,6 @@ static void emmTaskSeqRun(void)
             Serial.println("[任务序列] 探头在安全高度，跳过回收");
             emmSeqEndAfterDiscard();
         } else {
-            s_discardLiftFirst = true;   /* 探头可能还在低位，回收前先抬到安全高度 */
             emmTaskSeqEnterPhase(TASK_DISCARD_POS);
         }
         return;
@@ -2934,7 +3022,6 @@ static void emmTaskSeqRun(void)
             emmTaskSeqEnterPhase(TASK_PAUSE_PARK);
         } else {
             Serial.println("[任务序列] 已取到样，先回收再归位");
-            s_discardLiftFirst = true;   /* 探头可能还在低位，回收前先抬到安全高度 */
             emmTaskSeqEnterPhase(TASK_DISCARD_POS);
         }
         return;
