@@ -142,6 +142,19 @@ typedef enum
      *    **不要**把命令应答当成"已暂停"。
      */
     SEQ_PAUSE_PARKED = 380,
+
+    /* ---- 3 号接近开关试验命令（**2026/10/27 新增**）----
+     * `SET EMM LIFT TEST` 改成**异步**执行（否则阻塞主循环，`SET POWER OFF`
+     * 在测试途中根本读不进来）。命令**立即**回 `OK @n EMM LIFT TEST STARTED`，
+     * 真正的结局靠下面这几帧上报：
+     *   EVT 390 LIFT TEST DONE      （触发成功、3 号已停）
+     *   EVT 392 LIFT TEST STOPPED   （被 `SET POWER OFF` / 急停打断）
+     *   ERR 117                     （上升超时 / 退不出触发区 / 速度模式被拒）
+     * `391` 预留给"失败事件帧"，目前失败仍走 `ERR` 文本帧（与整机回零同口径：
+     * 上位机只把 `ERR` 当板子报错，`EVT ERR` 会被当未知事件忽略）。
+     */
+    LIFT_TEST_DONE = 390,    // 390 试验命令完成：接近开关触发，3 号已停止
+    LIFT_TEST_STOPPED = 392, // 392 试验命令被断电/急停打断（3 号已停，未完成触发）
 }EVentCode;
 
 

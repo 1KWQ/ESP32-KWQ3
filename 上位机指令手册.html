@@ -737,7 +737,13 @@
                 <li><b>⚠️ 不设零点</b>：3 号零点与 5 个点位<b>完全不变</b>，跑完可直接跑任务；<br>
                     但 3 号会停在触发点、开关仍被压住，跑任务前请先用 <code>SET EMM MOVE</code> 把 3 号降回工作高度。</li>
                 <li>接近开关接在 <b>GPIO2</b>（板子 Z1 那一路），<code>INPUT_PULLDOWN</code>、<b>高电平触发</b> —— 与样品盘那一路（GPIO6，低电平触发）<b>极性相反</b>，接线/排查时别搞混。</li>
-                <li><b>同步阻塞</b>，最长约 <b>30 秒</b>（满行程 37000 脉冲 @40 RPM ≈ 17.3 秒，故不能沿用通用的 15 秒超时）。</li>
+                <li><b>异步执行</b>（2026/10/27 下午改）：命令<b>立即</b>回 <code>OK @&lt;seq&gt; EMM LIFT TEST STARTED</code>，
+                    真正的结局靠事件帧上报 —— <code>EVT 390 LIFT TEST DONE</code> / <code>EVT 392 LIFT TEST STOPPED</code>。
+                    原先同步阻塞最长 30 秒，会把主循环堵死，<code>SET POWER OFF</code> 根本读不进来。</li>
+                <li><b>随时可以断电</b>：测试途中下发 <code>SET POWER OFF</code> 会立刻广播停机 + 断结构电源，
+                    后台任务在 10 ms 内看到 <code>cmd_power_off</code> 并退出，回 <code>EVT 392 LIFT TEST STOPPED</code>。</li>
+                <li>测试运行期间其它 <code>SET EMM *</code> 一律回 <code>110</code>（<code>GET EMM *</code> 照常可用）；
+                    <code>SET POWER OFF</code> 不在拦截范围。</li>
                 <li>⚠️ 若已下发过 <code>SET EMM LIFT MONITOR ARM=1</code>，请先 <code>ARM=0</code> 再测 —— 否则触发点附近的大电流可能让<b>扎偏保护</b>把 3 号再往上抬一次。</li>
               </ul>
             </td>
@@ -745,8 +751,10 @@
             <td>无</td>
             <td><code>SET EMM LIFT TEST @23</code></td>
             <td class="ret">
-              <code>OK @&lt;seq&gt; EMM LIFT TEST DONE</code><br>
-              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 序列/回零中<br>
+              <code>OK @&lt;seq&gt; EMM LIFT TEST STARTED</code>（立即）<br>
+              <span class="sep">｜</span> 随后 <code>EVT 390 LIFT TEST DONE</code><br>
+              <span class="sep">｜</span> 被打断 <code>EVT 392 LIFT TEST STOPPED</code><br>
+              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 已在跑/序列/回零中<br>
               <span class="sep">｜</span> <code>117</code> 触发超时 / 退不出触发区
             </td>
           </tr>
@@ -927,6 +935,8 @@
           <tr><td>371</td><td>HOME AXIS 2</td><td><code>EVT 371 HOME AXIS 2</code></td><td>进入 2 号（旋转）段。<b>会出现 2 次</b>（2 号共回零 3 次，分两段）</td></tr>
           <tr><td>372</td><td>HOME AXIS 4</td><td><code>EVT 372 HOME AXIS 4</code></td><td>进入 4 号（样品盘）接近开关标定段，1 次</td></tr>
           <tr><td>380</td><td>PAUSE PARKED</td><td><code>EVT 380 PAUSE PARKED</code></td><td><b><code>SEQ PAUSE</code> 真正生效的时刻</b>：回收 + 归位全部做完，探头已在取样位正上方、安全高度，可以安全开门取放样品盘。<br><b>上位机请以本帧为准判断"已暂停"</b>，不要用 <code>OK @n SEQ PAUSE</code>（那只是"已受理"）</td></tr>
+          <tr><td>390</td><td>LIFT TEST DONE</td><td><code>EVT 390 LIFT TEST DONE</code></td><td><code>SET EMM LIFT TEST</code> 完成：3 号已触发接近开关并停稳。<b>不带 <code>@seq</code></b>（与其它 <code>EVT</code> 一致）</td></tr>
+          <tr><td>392</td><td>LIFT TEST STOPPED</td><td><code>EVT 392 LIFT TEST STOPPED</code></td><td><code>SET EMM LIFT TEST</code> 被 <code>SET POWER OFF</code> / 硬件急停打断：3 号已停、测试未完成。<code>391</code> 预留（失败仍走 <code>ERR @n 117</code>）</td></tr>
         </tbody>
       </table>
     </div>

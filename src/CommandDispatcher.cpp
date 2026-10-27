@@ -162,7 +162,7 @@ static const CmdEntry cmdTable[] = {
     {"SET EMM TRAY HOME", cmdSetEmmTrayHome},//L2 样品盘（A=4）单独回零：同步阻塞（2026/10/19）
     {"SET EMM TRAY ZERO", cmdSetEmmTrayZero},//L2 样品盘标定"触发后顺时针前进"脉冲数（2026/10/26）
     {"GET EMM TRAY ZERO", cmdGetEmmTrayZero},//L2 查询上述脉冲数（2026/10/26）
-    {"SET EMM LIFT TEST", cmdSetEmmLiftTest},//试验：3 号上升至接近开关(GPIO2)触发即停，同步阻塞，**不设零点**（2026/10/27）
+    {"SET EMM LIFT TEST", cmdSetEmmLiftTest},//试验：3 号上升至接近开关(GPIO2)触发即停，**异步**（2026/10/27 下午改；同步会堵住 SET POWER OFF）
     {"SET EMM POINT", cmdSetEmmPoint},//L2 设置序列点位（运行期可改 + NVS 保存；2026/10/21 起复合动作运行中也可改，RESET=1 除外）
     {"GET EMM POINT", cmdGetEmmPoint},//L2 查询序列点位（一次返回 4 个当前值）
     {"GET EMM POINT LIFT", cmdGetEmmPointLift},//L2 查询 3 号升降点位（5 个，2026/10/20）
@@ -310,8 +310,16 @@ bool CommandDispatcher::dispatch(const char *cmd, int seq)
      */
     if (isEmmCommand &&
         (EmmSystemHome_BlocksCommand(entry->name) ||
-         EmmTaskSeq_BlocksCommand(entry->name))) {
-        Serial.printf("[EMM命令] @%d %s 被拒绝：复合动作（整机回零/任务序列）正在运行\n",
+         EmmTaskSeq_BlocksCommand(entry->name) ||
+         /*
+          * **2026/10/27 新增**：`SET EMM LIFT TEST`（3 号接近开关试验）改成异步
+          * 执行后，机器在后台任务里动，但 `dispatch()` 已经返回了 —— 必须显式
+          * 拦住其它 `SET EMM *`，否则中途插一条 `SET EMM MOVE A=3` 会跟测试抢电机。
+          * `SET POWER OFF` 不是 EMM 命令，不受影响（这正是需求要的：断电必须
+          * 随时能生效，不能被试验命令挡住）。
+          */
+         EmmLiftSwitchTest_BlocksCommand(entry->name))) {
+        Serial.printf("[EMM命令] @%d %s 被拒绝：复合动作（整机回零/任务序列/3号试验）正在运行\n",
                       seq, entry->name);
         sendWithCRC("ERR @%d %d", seq, SEQ_RUNNING);
         return false;
