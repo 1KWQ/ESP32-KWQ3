@@ -725,6 +725,32 @@
             </td>
           </tr>
           <tr>
+            <td class="name">3 号升降接近开关测试<br><small>（试验，2026/10/27）</small></td>
+            <td class="center">空闲</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>只验证「<b>接近开关让 3 号停下来</b>」是否可行，用于决定要不要正式改回零方式。</li>
+                <li>流程：<b>①</b> 若开关已处于触发状态，先<b>下降退出触发区</b>（否则一进来就判"已触发"，等于没测）；<br>
+                    <b>②</b> 速度模式向上（<code>DIR=0 RPM=40 ACC=20</code>）→ <b>③</b> 开关触发<b>立即发停止</b> →<br>
+                    <b>④</b> 等停稳（连续两次转速为 0）→ <b>⑤</b> 打印<b>触发点读数</b>与<b>本次实际行程</b>。</li>
+                <li><b>⚠️ 不设零点</b>：3 号零点与 5 个点位<b>完全不变</b>，跑完可直接跑任务；<br>
+                    但 3 号会停在触发点、开关仍被压住，跑任务前请先用 <code>SET EMM MOVE</code> 把 3 号降回工作高度。</li>
+                <li>接近开关接在 <b>GPIO2</b>（板子 Z1 那一路），<code>INPUT_PULLUP</code>、<b>低电平触发</b>，与样品盘那一路同极性。</li>
+                <li><b>同步阻塞</b>，最长约 <b>30 秒</b>（满行程 37000 脉冲 @40 RPM ≈ 17.3 秒，故不能沿用通用的 15 秒超时）。</li>
+                <li>⚠️ 若已下发过 <code>SET EMM LIFT MONITOR ARM=1</code>，请先 <code>ARM=0</code> 再测 —— 否则触发点附近的大电流可能让<b>扎偏保护</b>把 3 号再往上抬一次。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM LIFT TEST</code></td>
+            <td>无</td>
+            <td><code>SET EMM LIFT TEST @23</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; EMM LIFT TEST DONE</code><br>
+              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 序列/回零中<br>
+              <span class="sep">｜</span> <code>117</code> 触发超时 / 退不出触发区
+            </td>
+          </tr>
+          <tr>
             <td class="name">设置样品盘零点偏移</td>
             <td class="center">任何状态<br><small>（含回零/序列中）</small></td>
             <td class="center"><span class="led none"><i></i>不变</span></td>

@@ -23,6 +23,7 @@
 #include <strings.h>   /* strcasecmp：`SET LOG DETAIL=ON/OFF` 大小写不敏感（2026/10/21） */
 #include "common.h"
 #include "Rs485Devices.h"
+#include "EmmLiftSwitchTest.h"   /* SET EMM LIFT TEST（2026/10/27 试验命令，独立模块） */
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -161,6 +162,7 @@ static const CmdEntry cmdTable[] = {
     {"SET EMM TRAY HOME", cmdSetEmmTrayHome},//L2 样品盘（A=4）单独回零：同步阻塞（2026/10/19）
     {"SET EMM TRAY ZERO", cmdSetEmmTrayZero},//L2 样品盘标定"触发后顺时针前进"脉冲数（2026/10/26）
     {"GET EMM TRAY ZERO", cmdGetEmmTrayZero},//L2 查询上述脉冲数（2026/10/26）
+    {"SET EMM LIFT TEST", cmdSetEmmLiftTest},//试验：3 号上升至接近开关(GPIO2)触发即停，同步阻塞，**不设零点**（2026/10/27）
     {"SET EMM POINT", cmdSetEmmPoint},//L2 设置序列点位（运行期可改 + NVS 保存；2026/10/21 起复合动作运行中也可改，RESET=1 除外）
     {"GET EMM POINT", cmdGetEmmPoint},//L2 查询序列点位（一次返回 4 个当前值）
     {"GET EMM POINT LIFT", cmdGetEmmPointLift},//L2 查询 3 号升降点位（5 个，2026/10/20）
