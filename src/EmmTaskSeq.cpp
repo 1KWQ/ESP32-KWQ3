@@ -243,6 +243,19 @@
  */
 #define EMM_SEQ_LIFT_SAFE_TOL_COUNTS   8192L
 
+/**
+ * @brief "把 3 号抬到某高度"时用的定位方向。
+ * @details **2026/10/27 新增**。全工程 3 号的绝对定位都用 `DIR=1`
+ *          （回收 0/10、复位 1/3、暂停归位 1/2 都是）。
+ *
+ *          ⚠️ **符号就由它决定**：`positionMode()` 的 `PULSE` 是**无符号幅值**
+ *          （`EmmV5.h`："脉冲数为无符号 32 位值"），驱动器按 `DIR` 决定符号。
+ *          3 号的零点在**机械上限位**，所有工作位置都在零点**下方**，
+ *          `DIR=1` 让绝对目标落在零点下方 → `0x43` 读回的是**负计数**。
+ *          所以"绝对位置 5000"在驱动器里是 **-5000 脉冲 = -102400 计数**。
+ */
+#define EMM_SEQ_LIFT_SAFE_DIR          1U
+
 /*
  * ⚠️ 3 号（升降）的 5 个可调点位也已**移出本文件**（2026/10/20），改为运行期可改参数：
  *      EMM_SEQ_LIFT_POS_SAMPLE_1 / SAMPLE_2 / DETECT / DISCARD_2 / DISCARD_3
@@ -1764,7 +1777,19 @@ static bool emmSeqMoveStep(uint8_t addr, uint8_t dir, uint16_t rpm, uint8_t acc,
 static bool emmSeqLiftSafeBeforeRotate(const char *label, uint32_t safePos,
                                        uint16_t rpm, uint8_t acc)
 {
-    const int32_t targetCounts = emmJudgePulseToCounts(safePos);
+    /*
+     * ⚠️ **符号**：`PULSE` 是无符号幅值，符号由 `DIR` 决定（见 `EMM_SEQ_LIFT_SAFE_DIR`）。
+     *    3 号 零点在机械上限位、工作位置全在下方，`DIR=1` → 绝对目标为**负计数**。
+     *
+     *    2026/10/27 实机日志（检测位中途暂停）：
+     *      抬升前读回 `-256864` 计数（≈ -12542 脉冲，正在往检测位下降的途中）；
+     *      抬升后读回 `-102390` 计数（≈ -5000 脉冲，**正好是安全高度**）。
+     *    当时按 `+102400` 去比，于是把"已经到位"判成"差 -204790"，白抬两次再报错
+     *    —— 这就是那个 bug。现在按 DIR 推出符号，比对的是 **-102400**。
+     */
+    const int32_t magCounts = emmJudgePulseToCounts(safePos);
+    const int32_t targetCounts =
+        (EMM_SEQ_LIFT_SAFE_DIR == 1U) ? -magCounts : magCounts;
 
     /*
      * 最多 3 轮：读 → (不在就抬) → 读 → (不在就抬) → 读。
@@ -1774,12 +1799,14 @@ static bool emmSeqLiftSafeBeforeRotate(const char *label, uint32_t safePos,
     for (uint8_t attempt = 0; attempt < 3U; ++attempt) {
         /* ---- 1. 读 3 号实际位置（单位：驱动器计数） ---- */
         int32_t curCounts = 0;
+        int32_t drvTarget = 0;   /* 驱动器自己的目标位置，仅用于日志诊断 */
         bool readOk = false;
         if (Rs485Bus_Take(EMM_TASK_SEQ_BUS_TIMEOUT_MS)) {
             EmmV5::SystemState st = {};
             if (gEmm.readSystemState(EMM_LIFT_MOTOR, st,
                                      EMM_TASK_SEQ_CMD_TIMEOUT_MS) == EmmV5::STATUS_OK) {
                 curCounts = st.realtimePosition;
+                drvTarget = st.targetPosition;
                 readOk = true;
             }
             Rs485Bus_Give();
@@ -1804,10 +1831,11 @@ static bool emmSeqLiftSafeBeforeRotate(const char *label, uint32_t safePos,
         }
 
         /* ---- 4. 不在 → 抬过去（下一轮再读一次核对） ---- */
-        Serial.printf("[任务序列] %s：3 号当前 %ld 计数，目标位置应为 %ld 计数"
-                      "（差 %ld），先抬回去再旋转\n",
-                      label, (long)curCounts, (long)targetCounts, (long)diff);
-        if (!emmSeqMoveStep(EMM_LIFT_MOTOR, 1U, rpm, acc,
+        Serial.printf("[任务序列] %s：3 号当前 %ld 计数（驱动器目标 %ld），"
+                      "应到 %ld 计数（差 %ld），先抬回去再旋转\n",
+                      label, (long)curCounts, (long)drvTarget,
+                      (long)targetCounts, (long)diff);
+        if (!emmSeqMoveStep(EMM_LIFT_MOTOR, EMM_SEQ_LIFT_SAFE_DIR, rpm, acc,
                             safePos, 1U, safePos, label)) {
             return false;
         }
