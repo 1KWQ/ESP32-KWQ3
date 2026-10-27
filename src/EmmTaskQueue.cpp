@@ -13,6 +13,7 @@
  */
 
 #include "EmmTaskQueue.h"
+#include "common.h"   /* LOGD（日志分级，2026/10/21） */
 
 #include <string.h>
 
@@ -95,8 +96,10 @@ void EmmTaskQueue_Clear(void)
     s_taskIdx = 0;
     memset(s_queue, 0, sizeof(s_queue));
 
-    Serial.printf("[任务队列] 已清空：原有 %u 条，当前 0/%u 条\n",
-                  (unsigned)before, (unsigned)EMM_TASK_QUEUE_MAX);
+    /* **2026/10/21**：降为 `LOGD` —— 每次序列跑完都会刷这一行，属于收尾流水账；
+       真正表示"跑完了"的是 `EVT 300 SEQ ALL DONE`。 */
+    LOGD("[任务队列] 已清空：原有 %u 条，当前 0/%u 条\n",
+         (unsigned)before, (unsigned)EMM_TASK_QUEUE_MAX);
 }
 
 uint8_t EmmTaskQueue_Count(void)

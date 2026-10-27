@@ -20,6 +20,7 @@
 
 #include "CommandDispatcher.h"
 #include <string.h>
+#include <strings.h>   /* strcasecmp：`SET LOG DETAIL=ON/OFF` 大小写不敏感（2026/10/21） */
 #include "common.h"
 #include "Rs485Devices.h"
 #include <math.h>
@@ -43,6 +44,8 @@ static bool cmdGetLaserDistance(const char *args, int seq);
 static bool cmdGetValveStatus(const char *args, int seq);
 static bool cmdSeqAdd(const char *args, int seq);
 static bool cmdSeqClear(const char *args, int seq);
+static bool cmdSetLogDetail(const char *args, int seq);
+static bool cmdGetLog(const char *args, int seq);
 
 /**
  * @brief EMM V5/X42S 上位机命令处理函数声明。
@@ -130,13 +133,19 @@ static const CmdEntry cmdTable[] = {
     {"SET VALVE", cmdSetValveChannel},
     {"GET VALVE", cmdGetValveStatus},
 
+    /* ---- 日志分级（2026/10/21）：默认只发关键消息，详细流水账用 DETAIL=1 打开 ---- */
+    {"SET LOG DETAIL", cmdSetLogDetail},//SET LOG DETAIL=1/0（也接受 ON/OFF）
+    {"GET LOG", cmdGetLog},             //查询当前详细日志开关
+
     /* ---- 任务序列（L2 队列管理 + 执行引擎，见 EmmTaskQueue / EmmTaskSeq）---- */
     {"SEQ CLEAR", cmdSeqClear},   // 清空任务队列
     {"SEQ ADD", cmdSeqAdd},       // 追加一条任务：SEQ ADD <c>=<A> T=<T>
     {"SEQ START", cmdSeqStart},   // 开始执行：前置检查 → 从第 1 条开始跑
-    {"SEQ PAUSE", cmdSeqPause},   // 暂停（仅 RUNNING 时接受）
-    {"SEQ RESUME", cmdSeqResume}, // 恢复（仅 PAUSED 时接受）
-    {"SEQ STOP", cmdSeqStop},     // 中止并清空队列
+    {"SEQ PAUSE", cmdSeqPause},   // 暂停（归位式：停机 → 回收 → 归位到取样位正上方，2026/10/27）
+    {"SEQ RESUME", cmdSeqResume}, // 恢复（仅 PAUSED 时接受；无参数，只剩"重做"一种语义）
+    {"SEQ STOP", cmdSeqStop},     // 停止（接管原 END ALL：停机 → 回收 → 清空 → 复位）
+    {"END CUR", cmdEndCur},       // 结束当前任务：停机 → 回收 → 下一条（末条则复位）
+    {"ESTOP", cmdEstop},          // 急停（原 SEQ STOP 的"全丢"语义：就地停 + 清队列，不回收不复位）
 
     /********* EMM V5 闭环步进电机：命令名必须与上位机前缀匹配 *********/
     {"SET EMM ENABLE", cmdSetEmmEnable},
@@ -148,7 +157,13 @@ static const CmdEntry cmdTable[] = {
     {"SET EMM HOME PARAM", cmdSetEmmHomeParams},
     {"SET EMM HOME", cmdSetEmmHome},
     {"SET EMM SYSTEM HOME STOP", cmdSetEmmSystemHomeStop},//L2 整机回零：中止
-    {"SET EMM SYSTEM HOME", cmdSetEmmSystemHome},//L2 整机回零：启动（12 步序列）
+    {"SET EMM SYSTEM HOME", cmdSetEmmSystemHome},//L2 整机回零：启动（17 步序列）
+    {"SET EMM TRAY HOME", cmdSetEmmTrayHome},//L2 样品盘（A=4）单独回零：同步阻塞（2026/10/19）
+    {"SET EMM TRAY ZERO", cmdSetEmmTrayZero},//L2 样品盘标定"触发后顺时针前进"脉冲数（2026/10/26）
+    {"GET EMM TRAY ZERO", cmdGetEmmTrayZero},//L2 查询上述脉冲数（2026/10/26）
+    {"SET EMM POINT", cmdSetEmmPoint},//L2 设置序列点位（运行期可改 + NVS 保存；2026/10/21 起复合动作运行中也可改，RESET=1 除外）
+    {"GET EMM POINT", cmdGetEmmPoint},//L2 查询序列点位（一次返回 4 个当前值）
+    {"GET EMM POINT LIFT", cmdGetEmmPointLift},//L2 查询 3 号升降点位（5 个，2026/10/20）
     {"SET EMM ZERO", cmdSetEmmZero},//将当前角度清零5.2.3
     {"SET EMM SYNC", cmdSetEmmSync},
     {"SET EMM ORIGIN ZERO", cmdSetEmmOriginZero},//单圈回零的零点设置
@@ -285,6 +300,11 @@ bool CommandDispatcher::dispatch(const char *cmd, int seq)
      * 任务序列（L2，EmmTaskSeq）运行期间同理独占机械机构，拦截规则见
      * EmmTaskSeq_BlocksCommand()（多拦一条 SET EMM SYSTEM HOME，避免序列
      * 中途被整机回零打断）。
+     *
+     * **`SET EMM POINT` 是两个 BlocksCommand 里共同的例外**（2026/10/21 用户
+     * 要求"回零、任务序列时也可以更改"）：它只改内存变量 + 写 NVS，不产生
+     * 任何总线事务、不触发运动。`RESET=1` 仍被 `cmdSetEmmPoint()` 自己拒绝 ——
+     * 那道检查能看到参数，这两个只按命令名判断的函数看不到。
      */
     if (isEmmCommand &&
         (EmmSystemHome_BlocksCommand(entry->name) ||
@@ -352,6 +372,24 @@ static bool cmdPower(const char *args, int seq)
     {
         cmd_power_off = false;
         sysPoweronoFF(1);
+
+        /*
+         * 【2026/10/19 新增】上电即**重新布防**接近开关监控。
+         *
+         * 为什么必须有这一步：该功能在"样品盘零点标定"结束时会**必然关闭**
+         * （见 `emmHomeTrayHomeCore()` —— 托盘停在 01 号工位、开关长期被压住，
+         * 若保持开启，任务转到 01 号位时经过触发区会被急停）。
+         * 但关闭之后**没有任何路径再打开它**：`sysPowerOffCleanup()` 只在断电时
+         * 使能，于是"上电 → 初始化 → 整机回零（第 17 步标定完关闭）"跑完后，
+         * 接近开关的保护就永久失效了。
+         * 因此在这里补一次，与 `sysPowerOffCleanup()` 里的
+         * `EmmEndstopMonitor_SetEnabled(true)` 形成对称。
+         *
+         * 注意 `EmmEndstopMonitor_SetEnabled()` 本身**不发停止帧**：即使此刻
+         * 开关已被压住，也要等下一次**下降沿**才动作，所以上电调用是安全的。
+         */
+        EmmEndstopMonitor_SetEnabled(true);
+
         sendWithCRC("OK @%d POWER ON", seq);
 
         /*
@@ -546,7 +584,7 @@ static bool cmdSeqClear(const char *args, int seq)
         return false;
     }
 
-    EmmTaskQueue_Clear();   /* 内部会打印"已清空：原有 N 条"日志。 */
+    EmmTaskQueue_Clear();   /* 内部会打印"已清空：原有 N 条"（`LOGD`，默认不输出）。 */
 
     sendWithCRC("OK @%d SEQ CLEARED", seq);
     return true;
@@ -585,6 +623,90 @@ static bool cmdSetFa(const char *args, int seq){
     }
      sendWithCRC("ERR @%d %d", seq, PARAM_ERR); // 参数错误
     return false;
+}
+
+/**
+ * @brief 打开 / 关闭详细日志（**2026/10/21 新增**）。
+ * @cmd   SET LOG DETAIL=<1|0>，也接受 `ON` / `OFF`。
+ * @details
+ * 网口（CH9120）与串口共用 UART0，日志只有一套。默认**关闭**详细日志，
+ * 只输出关键消息（命令应答、阶段事件、失败原因），使上位机收到的流保持简洁；
+ * 现场排查时用本命令打开，即可看到每个动作的 `DIR/RPM/ACC/PULSE`、
+ * 到位误差、驱动器标志等流水账 —— **不需要重新编译烧录**。
+ *
+ * **失败路径不受本开关影响**：任何失败 / 超时 / 异常的诊断信息始终输出。
+ *
+ * @note 不写 NVS，掉电恢复默认（关闭）。这是刻意的：详细日志属于临时排查手段，
+ *       不希望某次忘关之后一直刷屏。
+ * @note 参数解析不用 `sscanf("%lu")` —— 它对 `abc` 返回 0，分不清"没读到"和
+ *       "读到 0"。这里先比 `ON/OFF`，再用 `strtoul` + `endPtr` 判尾。
+ */
+static bool cmdSetLogDetail(const char *args, int seq)
+{
+    cmd_on_line = true;
+    lasCmdTime = millis();
+
+    if (args == nullptr) {
+        sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+        return false;
+    }
+
+    /* 跳过前导空格，找 `=` 之后的取值。 */
+    const char *val = strchr(args, '=');
+    if (val == nullptr) {
+        Serial.println("[日志] 参数格式错误：用法 SET LOG DETAIL=1");
+        sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+        return false;
+    }
+    val++;
+
+    /* 拷到本地并裁掉尾部空白（含 \r\n），再做判断。 */
+    char text[8] = {0};
+    size_t n = 0;
+    while ((val[n] != '\0') && (n < sizeof(text) - 1U)) {
+        text[n] = val[n];
+        n++;
+    }
+    while ((n > 0U) && ((text[n - 1U] == ' ') || (text[n - 1U] == '\t') ||
+                        (text[n - 1U] == '\r') || (text[n - 1U] == '\n'))) {
+        text[--n] = '\0';
+    }
+
+    bool on;
+    if (strcasecmp(text, "ON") == 0) {
+        on = true;
+    } else if (strcasecmp(text, "OFF") == 0) {
+        on = false;
+    } else {
+        char *end = nullptr;
+        const unsigned long v = strtoul(text, &end, 10);
+        if ((end == text) || (end == nullptr) || (*end != '\0') || (v > 1UL)) {
+            Serial.printf("[日志] 参数取值非法：%s（只接受 1/0/ON/OFF）\n", text);
+            sendWithCRC("ERR @%d %d", seq, PARAM_ERR);
+            return false;
+        }
+        on = (v == 1UL);
+    }
+
+    log_detail_on = on;
+    Serial.printf("[日志] 详细日志 %s\n", on ? "已打开（每个动作都会打印参数与到位误差）"
+                                            : "已关闭（只发关键消息）");
+    sendWithCRC("OK @%d LOG DETAIL=%d", seq, on ? 1 : 0);
+    return true;
+}
+
+/**
+ * @brief 查询详细日志开关（**2026/10/21 新增**）。
+ * @cmd   GET LOG
+ * @return `OK @n LOG DETAIL=<0|1>`
+ */
+static bool cmdGetLog(const char *args, int seq)
+{
+    (void)args;
+    cmd_on_line = true;
+    lasCmdTime = millis();
+    sendWithCRC("OK @%d LOG DETAIL=%d", seq, log_detail_on ? 1 : 0);
+    return true;
 }
 
 /**
@@ -1774,6 +1896,7 @@ static bool cmdSetEmmHome(const char *args, int seq)
         sendWithCRC("ERR @%d %d", seq, RS485_BUSY);
         return false;
     }
+
     EmmV5::Status ret = all ? gEmm.homeBroadcast((uint8_t)mode, sync)
                             : gEmm.home(address, (uint8_t)mode, sync);
     Rs485Bus_Give();
@@ -3564,7 +3687,10 @@ static void emmHomeTracksResetAll(void)
  *               —— 请求中止，回零任务在步骤边界退出并自清 `busy`；
  *            3) 系统初始化：`SysInit_Abort()`
  *               —— 请求中止，初始化任务在检查点退出并自清 `busy`；
- *            4) 本文件内部瞬态：回零跟踪表 / 升降过流计时 / 升降监控布防。
+ *            4) 本文件内部瞬态：回零跟踪表 / 升降过流计时 / 升降监控布防；
+ *            5) 接近开关监控：**重新使能**（2026/10/16 新增）—— 它现在兼作样品盘
+ *               零点标定，正常运行时会被关闭（否则托盘转位经过零点会被它停住），
+ *               因此断电收尾时重新打开，保证下一次初始化还能用它标定零点。
  *
  *          全局零点标志 `sys_is_homed` 由调用方 `sysPowerOffCleanup()` 统一清零。
  *
@@ -3587,6 +3713,16 @@ static void emmResetTransientFlags(void)
     /* 4) 本文件内部瞬态。 */
     emmHomeTracksResetAll();
     s_emmLiftOverCurrentSince = 0;
+
+    /*
+     * 5) 接近开关监控重新使能（2026/10/16）：它现在兼作样品盘零点标定，
+     *    整机回零标定完会把它关掉（否则托盘正常转位经过零点会被停住），
+     *    所以断电收尾时重新打开 —— 下一次初始化时它才能标定样品盘零点
+     *    （用户要求"断电的时候再开启"）。
+     *    此处**不会**立即补发停止帧，见 EmmEndstopMonitor_SetEnabled() 注释。
+     */
+    EmmEndstopMonitor_SetEnabled(true);
+
     if (s_emmLiftMonitorArmed) {
         /*
          * 结构电源已断，升降电机不可能再运动，继续布防只会让监控任务空转

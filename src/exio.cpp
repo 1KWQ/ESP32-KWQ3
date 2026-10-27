@@ -182,12 +182,32 @@ void pollInterruptTask(void *param)
             if (v){  // 检测到外部结构电源断开。
               cmd_power_off = true;       // 标记软件断电，EMM 运动命令将被拒绝
               sys_power_on = false;
-              /* 结构断电前广播停止所有 EMM 电机，避免电机在断电瞬间仍在运动。 */
-              if (Rs485Bus_Take(500)) {
-                gEmm.stopBroadcast(false);
-                Rs485Bus_Give();
-              }
-              sysPoweronoFF(0);    // 关电。
+              /*
+               * **2026/10/27 改版（用户拍板"方案 A"）**：结构断电 = 硬件急停，
+               * 直接走 `sysPowerOffCleanup()` —— 与上位机 `SET POWER OFF`
+               * **完全同一条路径**，不再自己拼一遍收尾：
+               *
+               *   ① `EmmTaskSeq_Stop()`          停序列 + 清队列 + 复位执行状态机
+               *   ② `EmmSystemHome_RequestStop()`中止整机回零
+               *   ③ `SysInit_Abort()`           中止系统初始化
+               *   ④ 清回零跟踪表 / 撤防升降监控 / 重新使能接近开关监控
+               *   ⑤ 广播停止全部 EMM 电机
+               *   ⑥ 断结构电源
+               *   ⑦ `sys_is_homed = false`      零点失效，必须重新回零
+               *   ⑧ 三色灯回待机黄
+               *
+               * **为什么必须改**：原来这里只做 `EmmTaskSeq_Stop()` +
+               * `sysPoweronoFF(0)`，漏了 ②③⑦ —— 急停时若整机回零正在跑，
+               * `s_emmHomeBusy` 会一直卡到等到位超时；此后 `SET POWER ON`
+               * 触发的 `SysInit_Run()` 因 busy 被拒，**上电自动回零永久失效**，
+               * 只能断电重启恢复。零点标志也会残留"已回零"。
+               *
+               * ⚠️ `sysPowerOffCleanup()` 内部自己会置 `cmd_power_off = true`
+               *    并断电源，外面这两句是冗余的；保留是为了读代码时
+               *    "这个分支就是断电"一目了然，且 `sys_power_on` 只在本文件维护。
+               */
+              ESP_LOGI(TAG, "硬件急停（结构电源断开）→ 走断电全量复位");
+              sysPowerOffCleanup();
               ESP_LOGI(TAG,"Sys pwr OFF");
             } 
             else {

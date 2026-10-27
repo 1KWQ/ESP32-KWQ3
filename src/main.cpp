@@ -19,7 +19,7 @@
  *            - 共享 RS485 总线（SV04M 阀头 / GFL-Z 激光 / EMM V5 电机）；
  *            - EMM 安全监控：接近开关急停监控、升降电机相电流扎偏监控；
  *            - EMM 整机回零（L2 复合动作，EmmSystemHome）：常驻任务，
- *              由 SET EMM SYSTEM HOME 触发 12 步回零序列；
+ *              由 SET EMM SYSTEM HOME 触发 17 步回零序列；
  *            - 系统初始化流程（SysInit）：常驻任务，由 SET POWER ON 触发，
  *              上电稳定等待 → 前置检查（心跳/开关门/样品盘/温度）→
  *              六通阀（暂跳过）→ 自动启动整机回零。
@@ -267,7 +267,7 @@ void setup()
 
     /*
      * 创建整机回零（L2 复合动作）常驻任务。该任务默认阻塞等待
-     * SET EMM SYSTEM HOME 通知，收到命令后才驱动 12 步回零序列；依赖
+     * SET EMM SYSTEM HOME 通知，收到命令后才驱动 17 步回零序列；依赖
      * Rs485Devices_Init() 建立的共享总线，因此必须在其之后创建。
      */
     bool systemHomeOk = EmmSystemHome_Init();
@@ -287,6 +287,14 @@ void setup()
     if (!sysInitOk) {
         ESP_LOGE(TAG, "SysInit task create failed");
     }
+
+    /*
+     * 初始化序列点位（L2，2026/10/19 新增）：从 NVS 载入 2 号的取样 / 检测 /
+     * 回收 1 / 回收 2 四个点位；NVS 无记录时用 `EmmSeqPoints.h` 里的宏默认值。
+     * 纯内存 + NVS 操作，不依赖 RS485、也不创建任务，放在任务队列之前即可。
+     */
+    bool pointsOk = EmmSeqPoints_Init();
+    printModuleStatus("EmmSeqPoints", pointsOk);
 
     /*
      * 初始化任务队列（L2，只建队列不执行）。本模块是纯内存操作，既不依赖

@@ -1,0 +1,1050 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32-KWQ3 上位机指令手册</title>
+<style>
+  :root{
+    --bg:#f5f6f8;
+    --panel:#ffffff;
+    --line:#e3e6eb;
+    --line-strong:#cfd5dd;
+    --text:#1f2329;
+    --text-2:#5b6470;
+    --text-3:#8b949e;
+    --accent:#1a6dd9;
+    --accent-soft:#eaf2fd;
+    --yellow:#e8a400;
+    --green:#1f9d63;
+    --red:#d94a3d;
+    --grey:#b6bdc7;
+    --code-bg:#f3f5f8;
+    --code-text:#b3306b;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Microsoft YaHei","PingFang SC","Hiragino Sans GB","Source Han Sans SC",system-ui,-apple-system,"Segoe UI",sans-serif;
+    font-size:14px;
+    line-height:1.7;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1840px;margin:0 auto;padding:26px 24px 64px;}
+
+  /* ---------- 页头 ---------- */
+  .page-head{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:20px 24px;
+    margin-bottom:14px;
+  }
+  .page-head h1{margin:0 0 6px;font-size:22px;font-weight:700;letter-spacing:.2px;}
+  .page-head .meta{margin:0;color:var(--text-2);font-size:13px;}
+  .page-head .meta b{color:var(--text);font-weight:600;}
+  .pill{
+    display:inline-block;padding:1px 9px;margin:0 6px 4px 0;border-radius:999px;
+    font-size:12px;line-height:20px;background:var(--accent-soft);color:var(--accent);
+    border:1px solid #d3e4fb;
+  }
+  .pill.grey{background:#f1f3f6;color:var(--text-2);border-color:var(--line);}
+
+  /* ---------- 工具条 ---------- */
+  .toolbar{
+    position:sticky;top:0;z-index:30;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+    background:rgba(245,246,248,.94);backdrop-filter:blur(6px);
+    padding:10px 0 12px;margin-bottom:4px;
+  }
+  .toolbar input{
+    flex:1 1 300px;max-width:440px;height:36px;padding:0 12px 0 34px;
+    font-size:13px;font-family:inherit;color:var(--text);
+    background:var(--panel) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2' stroke-linecap='round'><circle cx='11' cy='11' r='7'/><line x1='16.5' y1='16.5' x2='21' y2='21'/></svg>") no-repeat 11px center;
+    border:1px solid var(--line-strong);border-radius:8px;outline:none;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .toolbar input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(26,109,217,.12);}
+  .toolbar .jump{display:flex;gap:6px;flex-wrap:wrap;}
+  .toolbar .jump a{
+    font-size:12.5px;color:var(--text-2);text-decoration:none;padding:5px 11px;
+    border:1px solid var(--line-strong);border-radius:999px;background:var(--panel);transition:all .15s;
+  }
+  .toolbar .jump a:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);}
+  .hit{font-size:12.5px;color:var(--text-3);margin-left:auto;}
+
+  /* ---------- 区块 ---------- */
+  section{
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    margin-bottom:14px;overflow:hidden;
+  }
+  section > h2{
+    margin:0;padding:14px 22px;font-size:15.5px;font-weight:700;
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#fbfcfd,#f7f8fa);
+  }
+  section > h2 .num{
+    display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;
+    margin-right:8px;border-radius:6px;background:var(--accent);color:#fff;
+    font-size:12px;font-weight:700;vertical-align:1px;
+  }
+  section > h2 .sub{font-weight:400;font-size:12.5px;color:var(--text-3);margin-left:8px;}
+  .tbl-scroll{overflow-x:auto;}
+  table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;}
+  thead th{
+    position:sticky;top:0;z-index:20;background:#eef1f5;color:#333b45;font-weight:700;
+    text-align:left;padding:10px 12px;border-bottom:1px solid var(--line-strong);
+    border-right:1px solid #e1e5eb;white-space:nowrap;
+  }
+  thead th:last-child{border-right:none;}
+  tbody td{
+    padding:12px;border-bottom:1px solid #eceff3;border-right:1px solid #f1f3f6;
+    vertical-align:top;
+  }
+  tbody td:last-child{border-right:none;}
+  tbody tr:hover td{background:#f8fbff;}
+  tbody tr:last-child td{border-bottom:none;}
+
+  td.name{font-weight:600;color:#111;}
+  td.center{white-space:nowrap;}
+
+  /* 功能说明 / 参数说明里的要点列表 */
+  ul.bul{margin:0;padding-left:15px;}
+  ul.bul > li{margin:3px 0;}
+  ul.bul > li::marker{color:#b8c0cc;}
+  .kv{margin:0;padding:0;list-style:none;}
+  .kv li{margin:3px 0;}
+  .kv b{font-weight:600;color:#333;}
+
+  /* 指示灯 */
+  .led{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+  .led i{width:9px;height:9px;border-radius:50%;display:inline-block;flex:0 0 auto;}
+  .led.y i{background:var(--yellow);box-shadow:0 0 0 3px rgba(232,164,0,.16);}
+  .led.g i{background:var(--green);box-shadow:0 0 0 3px rgba(31,157,99,.16);}
+  .led.r i{background:var(--red);box-shadow:0 0 0 3px rgba(217,74,61,.14);}
+  .led.off i{background:var(--grey);box-shadow:0 0 0 3px rgba(182,189,199,.18);}
+  .led.blink i{animation:blink 1s steps(1,end) infinite;}
+  .led.none i{background:#dfe3e9;}
+  @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:.15}}
+  .led small{color:var(--text-3);font-size:12px;}
+
+  /* 代码 */
+  code{
+    font-family:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;font-size:12.5px;
+    background:var(--code-bg);color:var(--code-text);padding:1.5px 6px;border-radius:5px;
+    white-space:nowrap;
+  }
+  .ret code{display:inline-block;white-space:normal;line-height:1.6;color:#1d4ed8;background:#f1f5fd;}
+  .ret .sep{color:var(--text-3);font-size:12px;}
+
+  /* ---------- 流程图 ---------- */
+  .flow{padding:22px 24px 8px;}
+  .flow-row{display:flex;align-items:stretch;flex-wrap:wrap;}
+  .fstep{
+    flex:1 1 0;min-width:150px;border:1px solid var(--line-strong);border-radius:10px;
+    background:#fcfdfe;padding:12px 14px;
+  }
+  .fstep .no{
+    display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;
+    border-radius:50%;background:var(--accent);color:#fff;font-size:11.5px;font-weight:700;margin-right:6px;
+  }
+  .fstep .t{font-weight:700;font-size:13.5px;}
+  .fstep .d{color:var(--text-2);font-size:12.5px;margin-top:4px;}
+  .fstep code{font-size:11.5px;padding:1px 5px;}
+  .farrow{
+    flex:0 0 26px;display:flex;align-items:center;justify-content:center;
+    color:#c3cad4;font-size:16px;
+  }
+  .fstep.hl{border-color:#bcd8fb;background:#f5f9ff;}
+
+  /* 任务内部四步 */
+  .subflow{margin:16px 0 6px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+  .subflow .s{
+    background:#f7f9fc;border:1px dashed var(--line-strong);border-radius:8px;
+    padding:7px 12px;font-size:12.5px;color:var(--text-2);
+  }
+  .subflow .s b{color:var(--text);}
+  .subflow .a{color:#c3cad4;}
+
+  .callout{
+    margin:14px 24px 20px;padding:12px 16px;border-left:3px solid var(--accent);
+    background:var(--accent-soft);border-radius:0 8px 8px 0;color:#274b7a;font-size:13px;
+  }
+  .callout b{color:#123a68;}
+  .callout.warn{border-left-color:#e8a400;background:#fdf6e6;color:#6b4d00;}
+  .callout.warn b{color:#4a3400;}
+
+  /* 小表（状态/错误） */
+  table.mini{min-width:0;}
+  table.mini thead th{position:static;}
+  table.mini td:first-child{white-space:nowrap;font-weight:600;}
+
+  /* 备注区 */
+  .notes{padding:6px 24px 18px;}
+  .notes ol{margin:0;padding-left:20px;}
+  .notes li{margin:9px 0;color:var(--text-2);}
+  .notes li b{color:var(--text);}
+
+  footer{text-align:center;color:var(--text-3);font-size:12px;padding:6px 0 0;}
+  footer code{background:transparent;color:var(--text-2);padding:0;}
+
+  @media (max-width:760px){
+    .wrap{padding:14px 10px 40px;}
+    .page-head{padding:16px;}
+    .page-head h1{font-size:18px;}
+    .farrow{flex:0 0 100%;height:18px;}
+  }
+  @media print{
+    body{background:#fff;}
+    .toolbar{display:none;}
+    section{border:none;break-inside:avoid;}
+    thead th{position:static;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page-head">
+    <h1>ESP32-KWQ3 上位机指令手册</h1>
+    <p class="meta">
+      <span class="pill">任务序列 10 条</span>
+      <span class="pill">整机回零 / 序列点位 6 条</span>
+      <span class="pill">日志与诊断 2 条</span>
+      <span class="pill grey">仅收录上层 API，不含 EMM 底层单一动作命令</span>
+    </p>
+    <p class="meta" style="margin-top:10px">
+      本表按 <b>KWQ3 固件实际程序</b>编写（非旧版 KWQ1/KWQ2 表格）　｜　
+      核对来源：<b>CommandDispatcher.cpp</b>、<b>EmmTaskSeq.cpp/.h</b>、<b>EmmTaskQueue.h</b>、<b>main.cpp</b>、<b>crc16.h</b>　｜　
+      核对日期：<b>2026-10-21</b>
+    </p>
+  </header>
+
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="搜索指令 / 功能 / 返回码，例如 SEQ、暂停、114" autocomplete="off">
+    <nav class="jump">
+      <a href="#s1">一、任务序列</a>
+      <a href="#s2">二、完整流程</a>
+      <a href="#s3">三、回零与点位</a>
+      <a href="#s4">四、日志与诊断</a>
+      <a href="#s5">五、错误码</a>
+      <a href="#s6">六、更正说明</a>
+    </nav>
+    <span class="hit" id="hit"></span>
+  </div>
+
+  <!-- ================= 一、任务序列 ================= -->
+  <section id="s1">
+    <h2><span class="num">一</span>任务序列<span class="sub">客户日常使用的核心功能，10 条命令</span></h2>
+    <div class="tbl-scroll">
+      <table style="min-width:1760px">
+        <colgroup>
+          <col style="width:156px"><col style="width:94px"><col style="width:106px">
+          <col style="width:496px"><col style="width:186px"><col style="width:296px">
+          <col style="width:166px"><col style="width:258px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>指令说明</th>
+            <th>开启状态</th>
+            <th>功能新增指示灯状态</th>
+            <th>功能说明</th>
+            <th>指令内容</th>
+            <th>参数说明</th>
+            <th>示例</th>
+            <th>返回</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- ---------- 1 SEQ ADD ---------- -->
+          <tr>
+            <td class="name">添加任务序列</td>
+            <td class="center">结构电源<br>已上电</td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li><b>只登记，不动机器。</b>把一条任务追加到队列末尾，可以连续下发多条，机器此时不会有任何动作。</li>
+                <li>一条任务 = <b>一个样品工位</b> + <b>该工位的检测停留时间</b>。</li>
+                <li>队列最多 <b>10 条</b>，第 11 条回 <code>114</code>；队列只存在内存里，<b>断电或休眠后清空</b>，需重新添加。</li>
+                <li><b>执行中也能继续添加</b>，新任务排在队尾，不影响正在跑的那条。</li>
+                <li>整机回零过程中<b>允许</b>提前编排队列（不抢电机）。</li>
+                <li>类型 <code>A</code> / <code>B</code> 目前执行流程完全一致，<b>统一填 A</b> 即可。</li>
+              </ul>
+            </td>
+            <td><code>SEQ ADD A=03 T=5</code></td>
+            <td>
+              <ul class="kv">
+                <li><b>&lt;类型&gt;</b>：<code>A</code> 或 <code>B</code>，须大写</li>
+                <li><b>&lt;工位&gt;</b>：<code>1~10</code>，对应样品盘第 N 个位置；<code>01</code> 与 <code>1</code> 等价</li>
+                <li><b>T</b>：检测位停留时间，单位<b>分钟</b>，<b>可带小数</b>（<code>0.5</code> = 30 秒，<code>0.1</code> = 6 秒），必须 <code>&gt;0</code></li>
+                <li><b>T 超过 30</b> 时按 <b>30 分钟</b>执行，并在串口日志告警</li>
+              </ul>
+            </td>
+            <td>
+              <code>SEQ ADD A=01 T=30</code><br>
+              <code>SEQ ADD A=05 T=0.5</code>
+            </td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; SEQ ADD</code><br>
+              <span class="sep">｜</span> <code>109</code> 结构电源未上电<br>
+              <span class="sep">｜</span> <code>102</code> 格式错 / 类型或工位越界<br>
+              <span class="sep">｜</span> <code>111</code> T ≤ 0<br>
+              <span class="sep">｜</span> <code>114</code> 队列已满（10 条）
+            </td>
+          </tr>
+
+          <!-- ---------- 2 SEQ START ---------- -->
+          <tr>
+            <td class="name">开始执行任务序列</td>
+            <td class="center">已上电<br>已回零<br>队列非空</td>
+            <td class="center"><span class="led g"><i></i>绿色</span></td>
+            <td>
+              <ul class="bul">
+                <li><b>把队列从头跑一遍。</b>命令立即回复，真实动作在后台依次执行，所以收到 <code>OK</code> 不代表已经做完。</li>
+                <li>启动前自动做 <b>9 项检查</b>：结构电源 → 序列空闲 → 队列非空 → 上位机在线 → 舱门关闭 → 样品盘到位 → 电机使能（占位）→ 温度未超限 → 已回零。任一不通过即拒绝并回对应错误码。</li>
+                <li><b>每条任务</b>依次做四步：样品盘转到本工位 → 取样位取样 → 检测位<b>停留 T 分钟</b> → 回收位抛弃。</li>
+                <li><b>进度靠阶段事件帧</b>：<code>CHECK BEGIN/OK</code> → <code>SAMPLE BEGIN/DONE</code> → <code>DETECT BEGIN</code> → <code>DWELL BEGIN/END</code> → <code>DETECT DONE</code> → <code>RECYCLE BEGIN/DONE</code>，每帧都带 <code>任务号/总数</code>。出错只发一帧 <code>ERR &lt;原因&gt; &lt;任务号&gt;/&lt;总数&gt;</code>。完整码表见 <a href="#s4">四、日志与诊断</a>。</li>
+                <li><b>全部跑完自动复位</b>：3 号升到 2000、2 号回到 0、4 号样品盘回零；随后<b>清空队列</b>并上报 <code>EVT 300 SEQ ALL DONE</code>。</li>
+                <li><b>中途任一步失败或超时</b>：上报<b>一帧</b> <code>ERR &lt;原因&gt; &lt;任务号&gt;/&lt;总数&gt;</code>（如 <code>ERR 取样动作失败 1/3</code>），再停全部电机，序列回到停止，<b>队列保留</b>便于排查。具体诊断见串口 <code>[任务序列] 步骤失败：…</code> 那一行。</li>
+                <li>序列运行期间会独占机构，其它 <code>SET EMM *</code> 动作命令一律被拒（查询类不受影响）。</li>
+              </ul>
+            </td>
+            <td><code>SEQ START</code></td>
+            <td>无</td>
+            <td><code>SEQ START @43</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; SEQ START</code><br>
+              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 已在运行/回零中<br>
+              <span class="sep">｜</span> <code>103</code> 队列为空　<code>115</code> 心跳不在线<br>
+              <span class="sep">｜</span> <code>107</code> 舱门未关　<code>105</code> 样品盘未到位<br>
+              <span class="sep">｜</span> <code>116</code> 温度超限　<code>104</code> 未回零
+            </td>
+          </tr>
+
+          <!-- ---------- 3 SEQ STOP ---------- -->
+          <tr>
+            <td class="name">任务序列停止</td>
+            <td class="center">运行中<br>暂停中</td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li><b>命令一到就停</b>，不等当前动作走完：立即广播停止全部电机。</li>
+                <li>随后<b>按回收流程把探头抬回安全高度</b>，再<b>清空整个队列</b>，
+                    然后执行<b>复位流程</b>（2 号回单圈原点 + 4 号样品盘重新标定），
+                    最后发 <code>EVT 300 SEQ ALL DONE</code>，灯变黄。</li>
+                <li><b>⚠️ 这是「收尾式停止」，不是立刻就地停</b>：从 <code>OK</code> 到
+                    <code>EVT 300</code> 之间可能隔<b>几十秒</b>（回收 + 复位要动电机）。
+                    <b>别把 <code>OK</code> 当成"已经停稳"。</b></li>
+                <li>要「就地停住、什么都不做」请用 <code>ESTOP</code>。</li>
+                <li>结构电源未接通时<b>拒绝</b>并回 <code>109</code>（因为要动电机）；
+                    序列本来就没跑时回 <code>OK</code>，属于空操作。</li>
+                <li>停止后要重新跑，必须<b>重新添加任务</b>再 <code>SEQ START</code>。</li>
+              </ul>
+            </td>
+            <td><code>SEQ STOP</code></td>
+            <td>无</td>
+            <td><code>SEQ STOP @55</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; SEQ STOP</code><br><span class="sep">｜</span> <code>ERR @&lt;seq&gt; 109</code> 未上电<br><span class="sep">（受理后异步收尾，看 <code>EVT 300</code>）</span></td>
+          </tr>
+
+          <!-- ---------- 3b END CUR ---------- -->
+          <tr>
+            <td class="name">结束当前任务</td>
+            <td class="center">运行中<br>暂停中</td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li><b>命令一到就停</b>：立即广播停止全部电机，不等当前动作走完。</li>
+                <li>随后<b>按回收流程把探头抬回安全高度</b>（3 号先升到安全位，再转回收位、吹扫、落盘），
+                    <b>不会</b>把探头留在样品或检测位。</li>
+                <li>回收完成后<b>直接执行下一条任务</b>；若当前就是<b>最后一条</b>，
+                    则转入任务阶段的<b>复位流程</b>（2 号回单圈原点 + 4 号重新标定），再发 <code>EVT 300</code>。</li>
+                <li>若当时<b>还没走到取样位</b>（刚转完盘、还没下降取样），探头本就在安全高度，
+                    <b>自动跳过回收</b>直接进下一条，省一趟空跑。</li>
+                <li>与 <code>SEQ STOP</code> 的区别：<b>STOP 清空整个队列并做复位；本命令只结束这一条，继续下一条</b>。</li>
+                <li>暂停中下发会<b>自动解除暂停</b>再执行收尾（语义是"结束"，不是"继续暂停"）。</li>
+                <li>序列没在跑时下发也回 <code>OK</code>，属于空操作。</li>
+              </ul>
+            </td>
+            <td><code>END CUR</code></td>
+            <td>无</td>
+            <td><code>END CUR @66</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; END CUR</code><br><span class="sep">｜</span> <code>ERR @&lt;seq&gt; 109</code> 未上电<br><span class="sep">（序列未运行时也回 OK，无动作）</span></td>
+          </tr>
+
+          <!-- ---------- 3c ESTOP ---------- -->
+          <tr>
+            <td class="name">急停</td>
+            <td class="center">任何状态<br><small>含未上电</small></td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li><b>就地按死</b>：立即广播停止全部电机 → <b>清空整个队列</b> → 序列回到停止状态 → 灯变黄。</li>
+                <li><b>不做回收、不做复位，探头停在原地</b>（可能还留在样品里/检测位上）。</li>
+                <li><b>同时中止其它复合动作</b>：正在跑的<b>整机回零</b>与<b>系统初始化</b>都会收到中止请求，
+                    在本步结束后退出（否则急停只停了"这一帧"，回零下一步会继续发命令）。</li>
+                <li><b>⚠️ 零点失效</b>：执行后 <code>sys_is_homed = false</code>，
+                    此后 <code>SEQ START</code> 会回 <code>104 NO_HOME</code>，
+                    <b>必须先 <code>SET EMM SYSTEM HOME</code> 重新回零</b>。
+                    （理由：急停属于异常终止，现场很可能有人手动盘动过机构。）</li>
+                <li><b>任何状态都接受、永不拒绝</b>：序列没在跑、结构电源已断、归位途中——一律回 <code>OK</code>。
+                    这是唯一"无条件可用"的停止命令。</li>
+                <li><b>与硬件急停的关系</b>：两者做的是同一套复位（停序列 + 中止回零/初始化 + 清零点），
+                    区别只在<b>硬件急停会额外切断结构电源</b>，之后必须 <code>SET POWER ON</code> 才能继续；
+                    软件 <code>ESTOP</code> 不切电源。</li>
+                <li>与 <code>SEQ STOP</code> 的区别：<b>STOP 会先把探头收回安全高度再做复位（要几十秒）；
+                    本命令立刻停、就地停、清零点</b>。</li>
+                <li><b>急停后恢复生产的完整步骤</b>：① 人工把探头/样品处理妥当 →
+                    ② <code>SET POWER ON</code>（若已断电）→ ③ <code>SET EMM SYSTEM HOME</code> 重新回零 →
+                    ④ <code>SEQ ADD …</code> 重新编队 → ⑤ <code>SEQ START</code>。</li>
+                <li>⚠️ 急停后<b>立刻</b>发 <code>SET EMM SYSTEM HOME</code> 可能回 <code>110</code> ——
+                    整机回零/初始化任务还在走到检查点，等几秒再发即可。</li>
+              </ul>
+            </td>
+            <td><code>ESTOP</code></td>
+            <td>无</td>
+            <td><code>ESTOP @68</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; ESTOP</code><br><span class="sep">（始终回 OK，永不拒绝）</span></td>
+          </tr>
+
+          <!-- ---------- 4 SEQ PAUSE ---------- -->
+          <tr>
+            <td class="name">任务暂停</td>
+            <td class="center">仅运行中</td>
+            <td class="center"><span class="led y blink"><i></i>黄色闪烁<br><small>500 ms</small></span></td>
+            <td>
+              <ul class="bul">
+                <li><b>立即停机</b>（不等当前动作走完），随后进入<b>归位流程</b>：</li>
+                <li>① <b>已取到样</b> → 先走完整<b>回收流程</b>（样品在回收位被处理掉）；
+                    <b>还没取到样</b> → 跳过回收。</li>
+                <li>② 3 号<b>抬到安全高度</b>（5000）→ 2 号<b>转到取样位正上方</b>。</li>
+                <li>③ 归位完成后才真正进入「暂停」状态，灯变黄色慢闪（500 ms），并发
+                    <code>EVT 380 PAUSE PARKED</code>。</li>
+                <li><b>⚠️ 命令应答是「已受理」，不是「已暂停」</b>：<code>OK</code> 立刻返回，
+                    但从 <code>OK</code> 到 <code>EVT 380</code> 之间要<b>回收 + 归位</b>（可能几十秒）。
+                    <b>上位机请以 <code>EVT 380</code> 为准</b>。</li>
+                <li><b>⚠️ 暂停会把样品丢掉</b>：回收位是处理样品的地方，不是放回托盘。
+                    所以 <code>SEQ RESUME</code> 后<b>必然重做这条任务</b>，不存在"续跑"。</li>
+                <li>暂停后探头在取样位正上方、安全高度，<b>可以开门取放样品盘</b>。</li>
+                <li>重复下发会幂等回 <code>OK</code>（正在归位 / 已暂停都算）；<b>已结束请求处理中</b>时也回
+                    <code>OK</code> 但忽略（结束比暂停更彻底）。</li>
+                <li>只有在<b>运行中</b>才接受；停止状态下发会回 <code>110</code>。</li>
+              </ul>
+            </td>
+            <td><code>SEQ PAUSE</code></td>
+            <td>无</td>
+            <td><code>SEQ PAUSE @40</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; SEQ PAUSE</code><br><span class="sep">｜</span> <code>ERR @&lt;seq&gt; 110</code> 非运行中<br><span class="sep">｜</span> <code>ERR @&lt;seq&gt; 109</code> 未上电<br><span class="sep">（真正暂停看 <code>EVT 380</code>）</span></td>
+          </tr>
+
+          <!-- ---------- 5 SEQ RESUME ---------- -->
+          <tr>
+            <td class="name">任务恢复执行</td>
+            <td class="center">仅暂停中</td>
+            <td class="center"><span class="led g"><i></i>绿色<br><small>恢复后绿灯常亮</small></span></td>
+            <td>
+              <ul class="bul">
+                <li><b>只有一种恢复方式：重做</b>（因此<b>不再需要 <code>MODE</code> 参数</b>）。</li>
+                <li>从取样位重新取样 → 检测（停留计时<b>重新计</b>）→ 回收 → 继续跑队列里剩下的任务。</li>
+                <li><b>只重做当前这一条</b>，已完成的任务不会重来。</li>
+                <li><b>⚠️ <code>MODE</code> 已整体移除</b>：老上位机若仍带 <code>MODE=0</code> / <code>MODE=1</code>，
+                    <b>不报错</b>（不会回 <code>102</code>），参数被忽略，按重做执行，串口打印一行提示；
+                    应答格式也不再回显 <code>MODE=</code>。</li>
+                <li>恢复前自动复查<b>舱门</b>与<b>样品盘</b>，未关好/未放好则拒绝。</li>
+                <li>恢复后仍从当前任务继续，<b>任务序号不变</b>。</li>
+              </ul>
+            </td>
+            <td><code>SEQ RESUME</code></td>
+            <td>
+              <ul class="kv">
+                <li><b>无参数</b></li>
+                <li><code>MODE=</code> 已废弃（带了也不报错，忽略）</li>
+              </ul>
+            </td>
+            <td>
+              <code>SEQ RESUME @41</code>
+            </td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; SEQ RESUME</code><br>
+              <span class="sep">｜</span> <code>110</code> 非暂停中<br>
+              <span class="sep">｜</span> <code>107</code> 舱门未关　<code>105</code> 样品盘未到位<br>
+              <span class="sep">｜</span> <code>109</code> 未上电
+            </td>
+          </tr>
+
+          <!-- ---------- 6 GET STATUS ---------- -->
+          <tr>
+            <td class="name">获取状态</td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>查询系统当前状态，<b>不动任何机构</b>，可随时调用。建议上位机 <b>1 秒轮询一次</b>用于刷新进度。</li>
+                <li><code>STATUS</code>：<b>0</b> = 停止，<b>1</b> = 运行中，<b>2</b> = 暂停。</li>
+                <li><code>STEP_PWR</code>：<b>1</b> = 结构电源已开，<b>0</b> = 已断电。</li>
+                <li><code>CUR</code>：当前正在执行第几条，<b>从 0 开始</b>（0 表示第 1 条）。</li>
+                <li><code>TOTAL</code>：队列里总共有几条任务。</li>
+                <li><code>HOMING</code>：<b>1</b> = 已回零，<b>0</b> = 未回零（未回零时不能 <code>SEQ START</code>）。</li>
+              </ul>
+            </td>
+            <td><code>GET STATUS</code></td>
+            <td>无</td>
+            <td><code>GET STATUS @10</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; STATUS=%d STEP_PWR=%d CUR=%d TOTAL=%d HOMING=%d</code></td>
+          </tr>
+
+          <!-- ---------- 7 SEQ CLEAR ---------- -->
+          <tr>
+            <td class="name">清空任务队列</td>
+            <td class="center">结构电源<br>已上电</td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li>一次性清空队列并复位进度，<b>不动机器</b>，用于重新编排。</li>
+                <li>运行中或暂停中<b>拒绝</b>（回 <code>110</code>），需先 <code>SEQ STOP</code> 或 <code>ESTOP</code>。</li>
+                <li>与 <code>SEQ STOP</code> 的区别：本命令<b>不动机器、不改序列状态</b>，只清条目；
+                    <code>SEQ STOP</code> 会做回收 + 复位（要动电机）。</li>
+              </ul>
+            </td>
+            <td><code>SEQ CLEAR</code></td>
+            <td>无</td>
+            <td><code>SEQ CLEAR @50</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; SEQ CLEARED</code><br><span class="sep">｜</span> <code>ERR @&lt;seq&gt; 110</code> 运行/暂停中</td>
+          </tr>
+
+          <!-- ---------- 8 SET POWER OFF ---------- -->
+          <tr>
+            <td class="name">断电</td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led off"><i></i>灯灭</span></td>
+            <td>
+              <ul class="bul">
+                <li>关闭结构电源，灯灭。</li>
+                <li>同时做完整收尾：<b>停序列并清空队列</b> → 停全部电机 → 清回零标志 → 复位所有残留状态。</li>
+                <li>断电后再跑序列，必须<b>重新上电 + 重新回零 + 重新添加任务</b>。</li>
+                <li>这之后所有运动命令都会回 <code>109</code>，属于正常保护。</li>
+              </ul>
+            </td>
+            <td><code>SET POWER OFF</code></td>
+            <td>无</td>
+            <td><code>SET POWER OFF @60</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; POWER OFF</code></td>
+          </tr>
+
+          <!-- ---------- 9 SET POWER ON ---------- -->
+          <tr>
+            <td class="name">上电</td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led y"><i></i>黄色</span></td>
+            <td>
+              <ul class="bul">
+                <li>合上结构电源，灯变黄。</li>
+                <li><b>自动做一次系统初始化</b>（含整机回零），在后台执行，命令<b>立即回 OK</b>，成功与否只看日志。</li>
+                <li>初始化没跑完就 <code>SEQ START</code> 会因「未回零」被拒（<code>104</code>），等 <code>GET STATUS</code> 的 <code>HOMING=1</code> 再启动。</li>
+                <li>若任务序列正在运行，本次<b>跳过</b>初始化（避免和序列抢电机）。</li>
+              </ul>
+            </td>
+            <td><code>SET POWER ON</code></td>
+            <td>无</td>
+            <td><code>SET POWER ON @60</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; POWER ON</code><br><span class="sep">（始终回 OK）</span></td>
+          </tr>
+
+          <!-- ---------- 10 PING ---------- -->
+          <tr>
+            <td class="name">心跳</td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led y"><i></i><span>黄色<br><small>断连恢复时<br>黄灯常亮</small></span></span></td>
+            <td>
+              <ul class="bul">
+                <li>上位机定时发（建议 <b>1 秒一次</b>），每收到一次就回 <code>PING @&lt;seq&gt;</code> 并刷新「上位机在线」计时。</li>
+                <li><b>超过 30 分钟</b>没收到 PING → 判定上位机断连 → <b>红灯常亮</b>；此时 <code>SEQ START</code> 会被拒（<code>115</code>），防止无人看管时机器自己跑。</li>
+                <li>断连后再收到第一个 PING 即恢复，<b>黄灯常亮</b>，可继续操作。</li>
+                <li>另有<b>指令休眠</b>：连续 30 分钟没有任何指令（含 PING）→ 自动按断电收尾（停序列、清队列、停电机、断结构电源）。</li>
+                <li>心跳本身<b>不改变</b>序列状态，只影响「允不允许启动」。</li>
+              </ul>
+            </td>
+            <td><code>PING</code></td>
+            <td>无</td>
+            <td><code>PING @1</code></td>
+            <td class="ret"><code>PING @&lt;seq&gt;</code><br><span class="sep">（原样回序号）</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout warn">
+      <b>关于 T 的小数：</b>单位是<b>分钟</b>，可以写小数。<code>T=0.5</code> 是 30 秒、<code>T=0.1</code> 是 6 秒、<code>T=1.5</code> 是 90 秒。
+      这个时间是<b>样品在检测位停留的时长</b>，不是整条任务的总耗时——转盘、取样、回收还要额外花时间。
+    </div>
+  </section>
+
+  <!-- ================= 二、完整流程 ================= -->
+  <section id="s2">
+    <h2><span class="num">二</span>任务序列怎么跑<span class="sub">从开机到跑完的完整顺序</span></h2>
+    <div class="flow">
+      <div class="flow-row">
+        <div class="fstep">
+          <div class="t"><span class="no">1</span>上电</div>
+          <div class="d"><code>SET POWER ON</code><br>合结构电源，后台自动初始化</div>
+        </div>
+        <div class="farrow">→</div>
+        <div class="fstep">
+          <div class="t"><span class="no">2</span>等回零完成</div>
+          <div class="d"><code>GET STATUS</code> 查到 <code>HOMING=1</code>，才可继续</div>
+        </div>
+        <div class="farrow">→</div>
+        <div class="fstep hl">
+          <div class="t"><span class="no">3</span>编排任务</div>
+          <div class="d"><code>SEQ ADD</code> × N<br>每条 = 工位 + 停留分钟</div>
+        </div>
+        <div class="farrow">→</div>
+        <div class="fstep hl">
+          <div class="t"><span class="no">4</span>开始执行</div>
+          <div class="d"><code>SEQ START</code><br>9 项检查通过后开跑</div>
+        </div>
+        <div class="farrow">→</div>
+        <div class="fstep">
+          <div class="t"><span class="no">5</span>自动复位</div>
+          <div class="d">跑完自动回位，清空队列，上报 <code>EVT 300</code></div>
+        </div>
+      </div>
+
+      <div class="subflow">
+        <span class="s" style="background:#eef4ff;border-style:solid;border-color:#cfe0fa"><b>每条任务内部：</b></span>
+        <span class="s"><b>①</b> 样品盘转到本工位</span><span class="a">→</span>
+        <span class="s"><b>②</b> 取样位取样</span><span class="a">→</span>
+        <span class="s"><b>③</b> 检测位停留 <b>T 分钟</b></span><span class="a">→</span>
+        <span class="s"><b>④</b> 回收位抛弃</span><span class="a">→</span>
+        <span class="s">下一条…</span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <b>三个容易被忽略的点：</b>
+      ① <code>SEQ START</code> 回 <code>OK</code> 只表示「已受理」，不代表动作做完，进度请看 <code>GET STATUS</code> 的 <code>CUR / TOTAL</code>；
+      ② 队列跑完会自动清空，<b>要再跑一批必须重新 <code>SEQ ADD</code></b>；
+      ③ 中途失败会保留队列，但序列已停止，修好问题后需重新 <code>SEQ START</code>（从第 1 条开始，不是从断点）。
+    </div>
+
+    <div style="padding:0 24px 20px">
+      <table class="mini">
+        <colgroup><col style="width:150px"><col style="width:190px"><col></colgroup>
+        <thead><tr><th>状态</th><th>指示灯</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td>停止 / 待机</td><td><span class="led y"><i></i>黄色常亮</span></td><td>已上电，没有任务在跑；可编排、可启动</td></tr>
+          <tr><td>运行中</td><td><span class="led g"><i></i>绿色常亮</span></td><td>正在按队列执行，机构被序列独占</td></tr>
+          <tr><td>暂停</td><td><span class="led y blink"><i></i>黄色慢闪（500 ms）</span></td><td>停在原地等待恢复，计时冻结</td></tr>
+          <tr><td>上位机断连</td><td><span class="led r"><i></i>红色常亮</span></td><td>30 分钟无心跳，禁止启动序列；收到 PING 即恢复</td></tr>
+          <tr><td>断电</td><td><span class="led off"><i></i>灯灭</span></td><td>结构电源已切断，需重新上电 + 回零</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 三、回零与点位 ================= -->
+  <section id="s3">
+    <h2><span class="num">三</span>整机回零与序列点位<span class="sub">支撑任务序列正常运行的 6 条命令</span></h2>
+    <div class="tbl-scroll">
+      <table style="min-width:1760px">
+        <colgroup>
+          <col style="width:156px"><col style="width:94px"><col style="width:106px">
+          <col style="width:496px"><col style="width:186px"><col style="width:296px">
+          <col style="width:166px"><col style="width:258px">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>指令说明</th>
+            <th>开启状态</th>
+            <th>功能新增指示灯状态</th>
+            <th>功能说明</th>
+            <th>指令内容</th>
+            <th>参数说明</th>
+            <th>示例</th>
+            <th>返回</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">整机回零</td>
+            <td class="center">空闲</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>启动 <b>17 步整机回零序列</b>（2 号旋转 / 3 号升降 / 4 号样品盘协同），建立全机零点。<br></li>
+                <li>流程是 <b>3 号与 2 号交替两轮</b>：3 号回零 → 下 1200 → 2 号回零 → 3 号回零 → 下 1200 → 2 号回零 → 顺 800 → 2 号回零 → 3 号回零 → 下 2500 → 样品盘。因为 <b>2 号旋转会带动 3 号丝杆</b>，所以每轮 2 号动作后都要重标一次 3 号零点。</li>
+                <li><b>立即回复后异步执行</b>；结果通过事件帧上报：成功 <code>EVT 360 HOME DONE</code>、失败 <code>ERR 整机回零失败</code>、被主动中止 <code>EVT 362 HOME STOPPED</code>。成功后 <code>HOMING</code> 才变 1。</li>
+                <li>未回零时 <code>SEQ START</code> 会被拒（<code>104</code>），这是最常见的一次性前置条件。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM SYSTEM HOME</code></td>
+            <td>无</td>
+            <td><code>SET EMM SYSTEM HOME @20</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; EMM SYSTEM HOME STARTED</code><br>
+              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 已在运行
+            </td>
+          </tr>
+          <tr>
+            <td class="name">整机回零中止</td>
+            <td class="center">回零运行中</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>请求中止整机回零：置中止标志，当前步骤结束后停止，并广播停全部电机。</li>
+                <li>中止后 <code>HOMING</code> 仍为 0，需要重新回零。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM SYSTEM HOME STOP</code></td>
+            <td>无</td>
+            <td><code>SET EMM SYSTEM HOME STOP @21</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; EMM SYSTEM HOME STOP ACCEPTED</code></td>
+          </tr>
+          <tr>
+            <td class="name">样品盘单独回零</td>
+            <td class="center">空闲</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>4 号样品盘单独回零，流程与整机回零第 17 步一致：<br>
+                    <b>①</b> 若接近开关已处于触发状态，先<b>逆时针转出触发区</b>（防零点漂移）；<br>
+                    <b>②</b> 顺时针转到接近开关触发 → <b>③</b> 关闭接近开关监控 →<br>
+                    <b>④</b> 继续顺时针走 <b>N 脉冲</b>（默认 <b>50</b>，用 <code>SET EMM TRAY ZERO</code> 可改）→<br>
+                    <b>⑤</b> 位置清零（此处即 <b>01 号工位</b>）→ <b>⑥</b> 设单圈零点 → <b>⑦</b> 读回核对。</li>
+                <li><b>同步阻塞</b>（约 1~10 秒），跑完才回复，成败可直接从应答判断。</li>
+                <li>用于整机回零失败后单独修正样品盘，不必整机重跑。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM TRAY HOME</code></td>
+            <td>无</td>
+            <td><code>SET EMM TRAY HOME @22</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; EMM TRAY HOME DONE</code><br>
+              <span class="sep">｜</span> <code>109</code> 未上电　<code>110</code> 序列/回零中<br>
+              <span class="sep">｜</span> <code>117</code> 回零失败
+            </td>
+          </tr>
+          <tr>
+            <td class="name">设置样品盘零点偏移</td>
+            <td class="center">任何状态<br><small>（含回零/序列中）</small></td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>设置样品盘标定零点时「<b>触发后继续顺时针前进的脉冲数</b>」<code>N</code>，写入 NVS <b>掉电保存</b>。</li>
+                <li>出厂默认 <b>50</b> 脉冲；一圈 = 3200 脉冲，故 <b>50 ≈ 5.6°</b>。</li>
+                <li>作用：把 01 号工位从"接近开关触发点"顺时针挪开一点，避开触发区边缘的抖动。</li>
+                <li><code>P=0</code> 表示"触发点即 01 号工位"（等价旧行为）。</li>
+                <li><b>运行中也能改</b>（只改内存 + NVS，不动机器）：标定流程进入时只读一次快照，<b>本次不受影响，下次生效</b>。</li>
+                <li>改了之后建议重新执行一次 <code>SET EMM TRAY HOME</code> 或整机回零，新零点才生效。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM TRAY ZERO P=50</code></td>
+            <td>
+              <ul class="kv">
+                <li><b>P</b>：<code>0~3200</code>，只接受整数</li>
+                <li>带尾随字符（<code>50abc</code>）或超范围（<code>3201</code>）一律回 <code>102</code></li>
+              </ul>
+            </td>
+            <td><code>SET EMM TRAY ZERO P=50 @24</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; EMM TRAY ZERO P=50</code><br>
+              <span class="sep">｜</span> <code>102</code> 参数错 / 超范围 / NVS 写入失败
+            </td>
+          </tr>
+          <tr>
+            <td class="name">查询样品盘零点偏移</td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>读回 <code>SET EMM TRAY ZERO</code> 设的脉冲数，用于确认掉电保存是否生效。</li>
+                <li>没有设置过时返回出厂默认 <b>50</b>。</li>
+              </ul>
+            </td>
+            <td><code>GET EMM TRAY ZERO</code></td>
+            <td>无</td>
+            <td><code>GET EMM TRAY ZERO @25</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; EMM TRAY ZERO P=50</code></td>
+          </tr>
+          <tr>
+            <td class="name">设置序列点位</td>
+            <td class="center">空闲</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>设置序列点位，写入 NVS <b>掉电保存</b>。共 <b>9 个</b>：2 号旋转轴 4 个 + 3 号升降轴 5 个。</li>
+                <li>2 号出厂默认：<code>SAMPLE=985</code> / <code>DETECT=2850</code> / <code>DISC1=320</code> / <code>DISC2=265</code>。</li>
+                <li>3 号出厂默认：<code>LIFT_S1=32000</code> / <code>LIFT_S2=35000</code> / <code>LIFT_DET=26000</code> / <code>LIFT_D2=37000</code> / <code>LIFT_D3=31000</code>。</li>
+                <li>3 号是丝杆轴，<b>数值越大 = 越往下</b>。</li>
+                <li>一条命令只设 <b>一个</b>点位；<code>RESET=1</code> 把 9 个全部恢复出厂默认并清除 NVS。</li>
+                <li><b>任务序列 / 整机回零运行中也能改单点</b>（含暂停），立即回 <code>OK</code>。生效时机：<b>当前正在执行的那一步不受影响</b>（目标脉冲已下发），<b>从下一步起用新值</b>。</li>
+                <li>两个例外：<b>回收阶段</b>一次性读 4 个点位再连跑 5 个动作，回收中途改要等<b>下一轮回收</b>；<b>整机回零不读点位</b>，回零中改对本次回零无影响。</li>
+                <li><code>RESET=1</code> 在复合动作运行中<b>仍拒绝</b>（一次改 9 个，回 <code>110</code>），需先停序列/回零。</li>
+                <li>序列运行中改完会<b>自动重跑一次点位关系自检</b>，关系不合理只打串口警告、不拒绝（可能正处在"调一半"的中间态）。</li>
+              </ul>
+            </td>
+            <td><code>SET EMM POINT SAMPLE=985</code><br><code>SET EMM POINT LIFT_S1=32000</code></td>
+            <td>
+              <ul class="kv">
+                <li><code>&lt;NAME&gt;=&lt;PULSE&gt;</code> 或 <code>RESET=1</code></li>
+                <li>2 号：<code>SAMPLE</code> / <code>DETECT</code> / <code>DISC1</code> / <code>DISC2</code>，范围 <code>0~3200</code></li>
+                <li>3 号：<code>LIFT_S1</code> / <code>LIFT_S2</code> / <code>LIFT_DET</code> / <code>LIFT_D2</code> / <code>LIFT_D3</code>，范围 <code>0~40000</code></li>
+                <li>只接受整数；带小数（<code>985.5</code>）或尾随字符（<code>985abc</code>）一律回 <code>102</code></li>
+              </ul>
+            </td>
+            <td><code>SET EMM POINT DETECT=2850 @23</code><br><code>SET EMM POINT LIFT_S1=32500 @23</code></td>
+            <td class="ret">
+              <code>OK @&lt;seq&gt; EMM POINT SAMPLE=985</code><br>
+              <code>OK @&lt;seq&gt; EMM POINT LIFT_S1=32500</code><br>
+              <code>OK @&lt;seq&gt; EMM POINT RESET</code><br>
+              <span class="sep">｜</span> <code>102</code> 参数错　<code>110</code> 复合动作运行中（仅 <code>RESET=1</code>）
+            </td>
+          </tr>
+          <tr>
+            <td class="name">查询序列点位<br><span style="color:#888;font-weight:400">（2 号）</span></td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>一次返回 <b>2 号旋转轴 4 个</b>点位的<b>当前值</b>（不是出厂默认值）。</li>
+                <li>序列运行中仍可查询，常用于核对现场标定结果。</li>
+                <li>3 号的 5 个点位用下一条 <code>GET EMM POINT LIFT</code> 查询 —— 9 个值拼一行会超过单帧长度上限，故拆成两条。</li>
+              </ul>
+            </td>
+            <td><code>GET EMM POINT</code></td>
+            <td>无</td>
+            <td><code>GET EMM POINT @24</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; EMM POINT SAMPLE=%lu DETECT=%lu DISC1=%lu DISC2=%lu</code></td>
+          </tr>
+          <tr>
+            <td class="name">查询序列点位<br><span style="color:#888;font-weight:400">（3 号）</span></td>
+            <td class="center">任何状态</td>
+            <td class="center"><span class="led none"><i></i>不变</span></td>
+            <td>
+              <ul class="bul">
+                <li>一次返回 <b>3 号升降轴 5 个</b>点位的<b>当前值</b>（不是出厂默认值）。</li>
+                <li>与上一条配合使用，两条合起来就是全部 9 个点位。</li>
+                <li>序列运行中仍可查询。</li>
+              </ul>
+            </td>
+            <td><code>GET EMM POINT LIFT</code></td>
+            <td>无</td>
+            <td><code>GET EMM POINT LIFT @25</code></td>
+            <td class="ret"><code>OK @&lt;seq&gt; EMM POINT LIFT LIFT_S1=%lu LIFT_S2=%lu LIFT_DET=%lu LIFT_D2=%lu LIFT_D3=%lu</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">
+      <b>运行期互锁：</b>整机回零运行期间拦截所有 <code>SET EMM *</code>（放行两条回零命令），<code>GET EMM *</code> 保持可用；
+      任务序列运行期间同样拦截，但<b>不放行</b> <code>SET EMM SYSTEM HOME</code>，避免序列被回零打断。命中一律回 <code>ERR 110</code>。<br>
+      <b><code>SET EMM POINT</code> 是唯一的例外</b>（2026/10/21 起）：它只改内存变量 + 写 NVS，不产生总线事务、不触发运动，
+      所以回零/序列运行中<b>也能改单点</b>。但 <code>RESET=1</code> 仍拒绝 —— 一次改 9 个，必须先停。
+    </div>
+  </section>
+
+  <!-- ================= 四、日志与诊断 ================= -->
+  <section id="s4">
+    <h2><span class="num">四</span>日志与诊断<span class="sub">默认只发关键消息，需要细节时用一条命令打开</span></h2>
+
+    <div class="notes">
+      <p style="margin:6px 0"><b>默认只发关键消息。</b>串口与网口（CH9120）接在<b>同一根 UART0</b> 上，日志只有一套，内容是：<b>命令应答 + 阶段事件 + 失败原因</b>。每个动作的 <code>DIR/RPM/ACC/PULSE</code>、到位误差、驱动器标志、点位快照等"流水账"<b>默认不输出</b>。</p>
+      <p style="margin:6px 0"><b>失败路径永远详细。</b>任何失败 / 超时 / 异常的诊断信息<b>不受开关影响</b>，一定打出来 —— 平时干净，出问题时证据齐全。</p>
+      <p style="margin:6px 0"><b>掉电不保存。</b>详细日志开关属于临时排查手段，重新上电恢复为"关闭"。</p>
+    </div>
+
+    <div class="tbl-scroll">
+      <table class="mini">
+        <colgroup><col style="width:170px"><col style="width:240px"><col style="width:330px"><col></colgroup>
+        <thead><tr><th>指令说明</th><th>指令内容</th><th>参数说明</th><th>返回</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>打开 / 关闭详细日志</td>
+            <td><code>SET LOG DETAIL=1</code><br><code>SET LOG DETAIL=0</code></td>
+            <td>取值 <code>1</code> / <code>0</code>，也接受 <code>ON</code> / <code>OFF</code>（大小写不敏感）。打开后每个动作都会打印参数与到位误差</td>
+            <td class="ret"><code>OK @&lt;seq&gt; LOG DETAIL=1</code><br><span class="sep">｜</span> <code>102</code> 参数错</td>
+          </tr>
+          <tr>
+            <td>查询详细日志开关</td>
+            <td><code>GET LOG</code></td>
+            <td>无</td>
+            <td class="ret"><code>OK @&lt;seq&gt; LOG DETAIL=0</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin:26px 24px 10px;font-size:15px;font-weight:600;color:var(--text)">阶段事件帧：精简日志下，上位机收到的全部进度</p>
+    <div class="tbl-scroll">
+      <table class="mini">
+        <colgroup><col style="width:70px"><col style="width:150px"><col style="width:360px"><col></colgroup>
+        <thead><tr><th>码值</th><th>事件</th><th>帧样例</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td>310</td><td>CHECK BEGIN</td><td><code>EVT 310 CHECK BEGIN</code></td><td>收到 <code>SEQ START</code>，开始 9 项前置检查</td></tr>
+          <tr><td>311</td><td>CHECK OK</td><td><code>EVT 311 CHECK OK</code></td><td>9 项全部通过（未通过只回 <code>ERR 1xx</code>，不发本帧）</td></tr>
+          <tr><td>320</td><td>SAMPLE BEGIN</td><td><code>EVT 320 SAMPLE BEGIN 1/3 A=01 T=0.100</code></td><td>开始取样。<b><code>A=</code> 工位</b>（两位，与 <code>SEQ ADD A=01</code> 同源）、<b><code>T=</code> 停留分钟</b>（与 <code>SEQ ADD … T=</code> 同源，配置原值）—— 用这两个值核对"板子正在跑的就是配置里的那一行"</td></tr>
+          <tr><td>321</td><td>SAMPLE DONE</td><td><code>EVT 321 SAMPLE DONE 1/3</code></td><td>取样完成</td></tr>
+          <tr><td>330</td><td>DETECT BEGIN</td><td><code>EVT 330 DETECT BEGIN 1/3</code></td><td>开始检测（2 号转检测位 → 3 号下降）</td></tr>
+          <tr><td>332</td><td>DWELL BEGIN</td><td><code>EVT 332 DWELL BEGIN 1/3 T=0.100</code></td><td><b>探头已到检测位、开始计时</b>（下降到位之后、计时之前）。收到就<b>开 CA、开始采集</b>。<code>T=</code> 是<b>实际</b>停留时间（超过 30 分钟按 30.000 发）</td></tr>
+          <tr><td>333</td><td>DWELL END</td><td><code>EVT 333 DWELL END 1/3</code></td><td><b>计时到了、3 号还没抬起</b>。收到就<b>停采集、关 CA</b></td></tr>
+          <tr><td>331</td><td>DETECT DONE</td><td><code>EVT 331 DETECT DONE 1/3</code></td><td>检测完成（3 号已抬回安全高度）</td></tr>
+          <tr><td>340</td><td>RECYCLE BEGIN</td><td><code>EVT 340 RECYCLE BEGIN 1/3</code></td><td>开始回收</td></tr>
+          <tr><td>341</td><td>RECYCLE DONE</td><td><code>EVT 341 RECYCLE DONE 1/3</code></td><td>回收完成</td></tr>
+          <tr><td>350</td><td>RESET BEGIN</td><td><code>EVT 350 RESET BEGIN</code></td><td>队列跑完，进入收尾复位（3 号开始上升）</td></tr>
+          <tr><td>351</td><td>RESET AXIS 2</td><td><code>EVT 351 RESET AXIS 2</code></td><td>2 号已回到单圈回零原点，读回核对通过</td></tr>
+          <tr><td>352</td><td>RESET AXIS 4</td><td><code>EVT 352 RESET AXIS 4</code></td><td>4 号样品盘接近开关回零完成</td></tr>
+          <tr><td>300</td><td>SEQ ALL DONE</td><td><code>EVT 300 SEQ ALL DONE</code></td><td>整条队列跑完（含复位完成）</td></tr>
+          <tr><td>360</td><td>HOME DONE</td><td><code>EVT 360 HOME DONE</code></td><td>整机回零 17 步全部成功</td></tr>
+          <tr><td>362</td><td>HOME STOPPED</td><td><code>EVT 362 HOME STOPPED</code></td><td>整机回零被主动中止（<b>不是失败</b>）</td></tr>
+          <tr><td>363</td><td>HOME BEGIN</td><td><code>EVT 363 HOME BEGIN</code></td><td>整机回零开始（上电自动回零没有命令应答，靠这条确认已启动）</td></tr>
+          <tr><td>370</td><td>HOME AXIS 3</td><td><code>EVT 370 HOME AXIS 3</code></td><td>进入 3 号（升降）段。<b>一次回零里会出现 3 次</b>（3 号共回零 3 次）</td></tr>
+          <tr><td>371</td><td>HOME AXIS 2</td><td><code>EVT 371 HOME AXIS 2</code></td><td>进入 2 号（旋转）段。<b>会出现 2 次</b>（2 号共回零 3 次，分两段）</td></tr>
+          <tr><td>372</td><td>HOME AXIS 4</td><td><code>EVT 372 HOME AXIS 4</code></td><td>进入 4 号（样品盘）接近开关标定段，1 次</td></tr>
+          <tr><td>380</td><td>PAUSE PARKED</td><td><code>EVT 380 PAUSE PARKED</code></td><td><b><code>SEQ PAUSE</code> 真正生效的时刻</b>：回收 + 归位全部做完，探头已在取样位正上方、安全高度，可以安全开门取放样品盘。<br><b>上位机请以本帧为准判断"已暂停"</b>，不要用 <code>OK @n SEQ PAUSE</code>（那只是"已受理"）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin:26px 24px 10px;font-size:15px;font-weight:600;color:var(--text)">异常帧：统一用 <code>ERR</code> 报（只有这种行表示板子出错）</p>
+    <div class="tbl-scroll">
+      <table class="mini">
+        <colgroup><col style="width:360px"><col></colgroup>
+        <thead><tr><th>帧样例</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td><code>ERR 取样动作失败 1/3</code></td><td>取样位动作失败（未到位 / 超时 / 命令被拒），<b>序列已中止</b>、队列保留</td></tr>
+          <tr><td><code>ERR 样品盘定位失败 1/3</code></td><td>4 号样品盘转不到目标工位</td></tr>
+          <tr><td><code>ERR 回到取样位失败 1/3</code></td><td><code>SEQ RESUME</code> 重做模式下回取样位途中失败</td></tr>
+          <tr><td><code>ERR 检测位动作失败 1/3</code></td><td>检测位定位失败</td></tr>
+          <tr><td><code>ERR 回收位动作失败 1/3</code></td><td>回收位动作失败</td></tr>
+          <tr><td><code>ERR 前导动作失败 1/3</code></td><td>前导（3 号抬升 + 2 号旋转）失败</td></tr>
+          <tr><td><code>ERR 复位失败 3/3</code></td><td>收尾复位失败（3 号上升 / 4 号样品盘回零 / 被中止）</td></tr>
+          <tr><td><code>ERR 读取任务数据失败 1/3</code></td><td>内部异常（理论上不该出现）</td></tr>
+          <tr><td><code>ERR 整机回零失败</code></td><td>整机回零失败（<code>HOMING</code> 保持 0）。<b>不带 <code>n/m</code></b>，因为它不属于某条任务</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin:26px 24px 10px;font-size:15px;font-weight:600;color:var(--text)">一条 <code>SEQ START</code>（1 个任务）实际收到的行</p>
+    <div style="margin:0 24px 18px;padding:14px 16px;border:1px solid var(--line);border-radius:8px;background:#fbfcfd;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.9;color:var(--text);white-space:pre;overflow-x:auto">OK @600 SEQ START#XXXX
+EVT 310 CHECK BEGIN#XXXX
+EVT 311 CHECK OK#XXXX
+EVT 320 SAMPLE BEGIN 1/1 A=01 T=0.100#XXXX
+EVT 321 SAMPLE DONE 1/1#XXXX
+EVT 330 DETECT BEGIN 1/1#XXXX
+EVT 332 DWELL BEGIN 1/1 T=0.100#XXXX     ← 开 CA、开始采集
+EVT 333 DWELL END 1/1#XXXX               ← 停采集、关 CA
+EVT 331 DETECT DONE 1/1#XXXX
+EVT 340 RECYCLE BEGIN 1/1#XXXX
+EVT 341 RECYCLE DONE 1/1#XXXX
+EVT 350 RESET BEGIN#XXXX                 （队列空了才有）
+EVT 351 RESET AXIS 2#XXXX
+EVT 352 RESET AXIS 4#XXXX
+EVT 300 SEQ ALL DONE#XXXX</div>
+    <div class="notes">
+      <p style="margin:6px 0"><b>只有命令应答带 <code>@&lt;seq&gt;</code>：</b><code>OK @600 …</code> / <code>ERR @600 102</code> 的 <code>@600</code> 是你下发命令的序号。所有 <code>EVT</code> 与异常 <code>ERR</code> 都是<b>板子主动上报</b>，不属于任何一条命令，<b>不带 <code>@</code></b>。</p>
+      <p style="margin:6px 0"><b>顺序说明：</b><code>CHECK BEGIN</code> 会<b>先于</b> <code>OK</code> 到达 —— 前置检查是同步执行的，而 <code>OK</code> 按原有约定只在<b>全部检查通过之后</b>才发（被拒时只回 <code>ERR 1xx</code>）。</p>
+      <p style="margin:6px 0"><b>每行任务固定 <code>320 → 321 → 330 → 332 → 333 → 331 → 340 → 341</code>：</b><code>332</code>/<code>333</code> 各出现一次。<b>只有 <code>332</code> 和 <code>333</code> 之间的时间窗才是"该采样的时间"</b>。</p>
+      <p style="margin:6px 0"><b>出错只发一帧 <code>ERR</code>：</b>格式 <code>ERR &lt;原因&gt; &lt;任务号&gt;/&lt;总数&gt;</code>，随后是详细诊断行（串口）。复位阶段队列已跑完，<code>n/m</code> 会钳到最后一条（如 <code>3/3</code>）。</p>
+      <p style="margin:6px 0"><b>复位阶段只有 3 帧：</b><code>350</code> → <code>351</code> → <code>352</code>，复位完成不另发 <code>DONE</code>，紧接着的 <code>300</code> 就是"整条序列结束"。<b>若 2 号回原点失败</b>（不中止序列），你会看到 <code>350</code> → <code>EVT 306 ROTARY NOT HOME</code> → <code>352</code> → <code>300</code>，<b>中间缺 351</b> —— 据此判断是哪一步出的问题。</p>
+    </div>
+  </section>
+
+  <!-- ================= 五、错误码 ================= -->
+  <section id="s5">
+    <h2><span class="num">五</span>错误码速查<span class="sub">src/crc16.h · ErrCode 枚举</span></h2>
+    <div class="tbl-scroll">
+      <table class="mini">
+        <colgroup><col style="width:96px"><col style="width:250px"><col style="width:430px"><col></colgroup>
+        <thead><tr><th>码值</th><th>枚举名</th><th>含义</th><th>怎么处理</th></tr></thead>
+        <tbody>
+          <tr><td>101</td><td>CRC_ERR</td><td>CRC 校验错误</td><td>检查通信链路，重发</td></tr>
+          <tr><td>102</td><td>PARAM_ERR</td><td>参数错误（格式、名字、范围、小数/尾随字符）</td><td>对照参数说明重写命令</td></tr>
+          <tr><td>103</td><td>TASK_NULL</td><td>任务队列为空</td><td>先 <code>SEQ ADD</code> 再启动</td></tr>
+          <tr><td>104</td><td>NO_HOME</td><td>没有回零</td><td>先 <code>SET EMM SYSTEM HOME</code>，等 <code>HOMING=1</code></td></tr>
+          <tr><td>105</td><td>NO_SAMPLE</td><td>样品盘没有到位</td><td>把样品盘放到位</td></tr>
+          <tr><td>106</td><td>NO_WATER</td><td>水瓶没有放到位（KWQ3 未使用）</td><td>—</td></tr>
+          <tr><td>107</td><td>NO_DOOR</td><td>门没有到位</td><td>关好舱门</td></tr>
+          <tr><td>108</td><td>NO_PWR</td><td>外部电源没通电</td><td>检查外部供电</td></tr>
+          <tr><td>109</td><td>NO_STEP_PWR</td><td>结构电源没通电（软件断电/休眠）</td><td>先 <code>SET POWER ON</code></td></tr>
+          <tr><td>110</td><td>SEQ_RUNNING</td><td>序列正在运行 / 互锁拒绝</td><td>先 <code>SEQ STOP</code> 或等待当前动作结束</td></tr>
+          <tr><td>111</td><td>ST_PARAM_ERR</td><td>任务时间参数错误（<code>T ≤ 0</code>）</td><td>把 T 改成大于 0 的分钟数</td></tr>
+          <tr><td>112</td><td>RS485_BUSY</td><td>RS485 总线忙</td><td>稍后重发</td></tr>
+          <tr><td>113</td><td>SV04M_CHANGE_FAILED</td><td>切换 SV-04M 通道失败</td><td>检查阀头连接</td></tr>
+          <tr><td>114</td><td>TASK_FULL</td><td>任务队列已满（上限 10 条）</td><td>先跑完或 <code>SEQ CLEAR</code></td></tr>
+          <tr><td>115</td><td>NO_HEARTBEAT</td><td>上位机心跳不在线</td><td>先发 <code>PING</code> 恢复</td></tr>
+          <tr><td>116</td><td>TEMP_HIGH</td><td>控制板/驱动温度超限</td><td>停机散热，或调高 <code>SET TEMP</code> 阈值</td></tr>
+          <tr><td>117</td><td>EMM_HOME_FAILED</td><td>样品盘单独回零执行失败</td><td>检查接近开关与机构，重新回零</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 六、更正说明 ================= -->
+  <section id="s6">
+    <h2><span class="num">六</span>相对旧版表格的更正<span class="sub">旧表沿用 KWQ1 描述，与本机程序不一致处已按代码改正</span></h2>
+    <div class="notes">
+      <ol>
+        <li><b>队列上限：</b>旧表「最多 36 条」→ 本机 <b>10 条</b>，超出回 <code>114</code>（旧版是静默丢弃仍回 OK，本机已修正为明确报错）。</li>
+        <li><b><code>SEQ ADD</code> 校验：</b>旧表「<code>S*T&gt;0</code> 且 <code>S*T≤220</code>」→ 本机已取消 <code>S</code>（速度）字段，只校验 <b>工位 1~10</b> 与 <b>T &gt; 0</b>。</li>
+        <li><b>T 的单位与小数：</b>本机 T 为<b>分钟</b>且<b>支持小数</b>（旧表未说明），超过 30 分钟按 30 分钟执行。</li>
+        <li><b>心跳超时：</b>旧表「2 s 超时判定断联」→ 本机为 <b>1800 s（30 分钟）</b>；另有 30 分钟无指令的休眠收尾。</li>
+        <li><b><code>SEQ RESUME</code>：</b>旧表参数「无」→ 本机<b>也无参数</b>。
+            2026/10/20 曾加过可选 <code>MODE=0/1</code>，<b>2026/10/27 已整体移除</b>
+            （恢复只剩"重做"一种方式）；老上位机带 <code>MODE=</code> 不会报错，参数被忽略。</li>
+        <li><b><code>END ALL</code> 已删除（2026/10/27）：</b>语义整体并入 <code>SEQ STOP</code>。
+            现在 <code>SEQ STOP</code> = 停机 → 回收 → 清队列 → 复位 → <code>EVT 300</code>；
+            原来的「就地停 + 清队列」改由新增的 <code>ESTOP</code> 承担。</li>
+        <li><b><code>SEQ PAUSE</code> 已改为「归位式」（2026/10/27）：</b>不再"停在原地"，
+            而是停机 → 回收（已取样时）→ 探头回到取样位正上方、安全高度 →
+            发 <code>EVT 380 PAUSE PARKED</code> 后才算真正暂停。<code>OK</code> 只代表已受理。</li>
+        <li><b>启动前检查：</b>旧表提到「水瓶检测」→ 本机实际检查<b>舱门 + 样品盘</b>，无水瓶项（<code>106</code> 未使用）。</li>
+        <li><b>轴数：</b>本机实际使用 <b>3 个 EMM 轴</b> —— 2 号旋转、3 号升降、4 号样品盘（地址 1 未使用）。旧表「三轴结构电源」的说法是对的，本次核对确认。</li>
+        <li><b>新增一行 <code>SEQ CLEAR</code>：</b>旧表未收录，实际为客户重排任务时的常用命令。</li>
+        <li><b>未收录内容：</b>EMM 底层单一动作命令（66 条）、<code>SET EMM LIFT MONITOR</code>、8 条外设命令按约定不进入本表，需要时查《EMM电机上位机命令手册》与《程序架构与内容总结.md》§5.2。</li>
+      </ol>
+    </div>
+  </section>
+
+  <footer>
+    本文件为纯静态单页，仅依赖浏览器；改动命令请同步更新本文件与 <code>修改日志.md</code>。
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var input = document.getElementById('q');
+  var hit = document.getElementById('hit');
+  var sections = Array.prototype.slice.call(document.querySelectorAll('section'));
+  var rows = Array.prototype.slice.call(document.querySelectorAll('tbody tr'));
+
+  function apply() {
+    var v = (input.value || '').trim().toLowerCase();
+    var visible = 0;
+
+    rows.forEach(function (tr) {
+      var ok = !v || tr.innerText.toLowerCase().indexOf(v) !== -1;
+      tr.style.display = ok ? '' : 'none';
+      if (ok) visible++;
+    });
+
+    sections.forEach(function (sec) {
+      var own = sec.querySelectorAll('tbody tr');
+      if (!own.length) return;
+      var any = Array.prototype.some.call(own, function (tr) {
+        return tr.style.display !== 'none';
+      });
+      sec.style.display = any ? '' : 'none';
+    });
+
+    hit.textContent = v ? ('匹配 ' + visible + ' 行') : '';
+  }
+
+  input.addEventListener('input', apply);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { input.value = ''; apply(); }
+  });
+})();
+</script>
+</body>
+</html>

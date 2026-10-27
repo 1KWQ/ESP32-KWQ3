@@ -33,5 +33,12 @@ volatile bool cmd_on_line = false; // 长时间没有指令，进入休眠
 
 bool cmd_power_off = false;  // 指令或者休眠模式下控制了断电
 
-// 整机是否已完成回零（由 EmmSystemHome 的 12 步序列全部成功后置位）
+// 整机是否已完成回零（由 EmmSystemHome 的 17 步序列全部成功后置位）
 volatile bool sys_is_homed = false;
+
+/*
+ * 详细日志开关（2026/10/21 新增）。
+ * 默认 **关闭**：只输出关键消息（命令应答、阶段事件、失败原因），
+ * 上位机收到的流干净、行数少。用 `SET LOG DETAIL=1` 打开。
+ */
+volatile bool log_detail_on = false;

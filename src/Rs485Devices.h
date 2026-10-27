@@ -55,6 +55,25 @@ void Rs485Devices_Init(void);
  */
 bool EmmEndstopMonitor_Init(void);
 
+/**
+ * @brief 使能 / 关闭接近开关监控（**2026/10/16 新增**，上电默认**使能**）。
+ * @details 接近开关（GPIO6）自 2026/10/16 起同时承担**样品盘零点标定**的角色：
+ *          整机回零的最后一步用它在速度模式下把样品盘转到零点。标定完成后必须
+ *          **关闭**本监控 —— 否则托盘正常转位经过零点时会被它触发停机。
+ *          重新使能的三处：① `cmdPower()` 的 `SET POWER ON` 分支（**2026/10/19 新增**，
+ *          保证"上电 → 回零 → 标定完关闭"之后下一次上电仍能重新布防）；
+ *          ② `sysPowerOffCleanup()`（断电收尾）；③ 样品盘零点标定步骤开始处
+ *          （整机回零第 17 步与 `SET EMM TRAY HOME` 共用，双保险，见 `EmmSystemHome.cpp`）。
+ * @param enabled true 使能（触发即向 MONITOR_EMM 发停止）；false 关闭（只丢弃通知）。
+ * @note 关闭后 GPIO 下降沿中断仍然挂着，只是监控任务不再发停止命令；重新使能时
+ *       若引脚正处于低电平，**不会补发**停止（下一次下降沿才生效），避免在托盘
+ *       停在零点压住开关时反复向已断电的驱动器发帧。
+ */
+void EmmEndstopMonitor_SetEnabled(bool enabled);
+
+/** @brief 查询接近开关监控当前是否使能（true=触发会停 MONITOR_EMM）。 */
+bool EmmEndstopMonitor_IsEnabled(void);
+
 /** @brief 在指定超时时间内获取共享 RS485 总线。 */
 bool Rs485Bus_Take(uint32_t timeoutMs);
 /** @brief 释放共享 RS485 总线。 */

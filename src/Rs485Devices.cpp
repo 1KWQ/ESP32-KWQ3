@@ -31,6 +31,19 @@ static bool s_rs485Inited = false;
 /** 接近开关监控任务句柄；GPIO 中断只负责唤醒该任务，不在中断中访问串口。 */
 static TaskHandle_t s_emmEndstopMonitorTaskHandle = nullptr;
 
+/**
+ * @brief 接近开关监控使能标志（**2026/10/16 新增**，上电默认**使能**）。
+ * @details 接近开关（GPIO6）自 2026/10/16 起同时承担**样品盘零点标定**的角色：
+ *          整机回零的最后一步用它在速度模式下把样品盘转到零点。标定完成后必须
+ *          **关闭**本监控 —— 否则托盘正常转位经过零点时会被它触发停机。
+ *          重新使能的三处：① `cmdPower()` 的 `SET POWER ON` 分支（**2026/10/19 新增**，
+ *          保证"上电 → 回零 → 标定完关闭"之后下一次上电仍能重新布防）；
+ *          ② `sysPowerOffCleanup()`（断电收尾）；③ 样品盘零点标定步骤开始处
+ *          （整机回零第 17 步与 `SET EMM TRAY HOME` 共用，双保险，见 `EmmSystemHome.cpp`）。
+ * @note 用 `volatile`：它同时被监控任务、整机回零任务和命令分发上下文读写。
+ */
+static volatile bool s_emmEndstopMonitorEnabled = true;
+
 /** 共享 RS485 硬件串口实例；所有设备驱动都绑定到同一个 UART。 */
 HardwareSerial Rs485Uart(1);
 /** SV-04M 阀头驱动实例。 */
@@ -76,6 +89,16 @@ static void emmEndstopMonitorTask(void *argument)
         /* 阻塞等待下降沿；pdTRUE 会在取出通知时清除当前累计值。 */
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        /*
+         * 监控已被关闭（整机回零用接近开关标定完样品盘零点后会关掉它）：
+         * 直接丢弃本次通知，不发停止命令。
+         * 关闭期间不消费"引脚是否仍为低电平"的判断，因此托盘停在零点压住开关
+         * 也不会误发停止帧。
+         */
+        if (!s_emmEndstopMonitorEnabled) {
+            continue;
+        }
+
         /* 若脉冲很短、任务运行时引脚已经恢复高电平，则无需停止电机。 */
         if (digitalRead(Y_ENDSTOP2_PIN) != LOW) {
             continue;
@@ -118,12 +141,20 @@ static void emmEndstopMonitorTask(void *argument)
         /*
          * 一次低电平只触发一次停止。只有接近开关恢复高电平，任务才重新布防，
          * 从而避免触发保持期间不断发送停止帧和重复打印串口信息。
+         * 条件里带上使能标志：监控被关闭时立刻退出本循环 ——
+         * 否则"托盘停在零点、一直压住开关"会让任务永远卡在这里，无法响应后续的
+         * 使能 / 关闭切换。
          */
-        while (digitalRead(Y_ENDSTOP2_PIN) == LOW) {
+        while (digitalRead(Y_ENDSTOP2_PIN) == LOW && s_emmEndstopMonitorEnabled) {
             vTaskDelay(pdMS_TO_TICKS(5));
         }
-        Serial.printf("[EMM监控] GPIO%d已恢复高电平，监控重新布防\n",
-                      Y_ENDSTOP2_PIN);
+        if (!s_emmEndstopMonitorEnabled) {
+            Serial.printf("[EMM监控] 监控已关闭，GPIO%d 不再触发停止\n",
+                          Y_ENDSTOP2_PIN);
+        } else {
+            Serial.printf("[EMM监控] GPIO%d已恢复高电平，监控重新布防\n",
+                          Y_ENDSTOP2_PIN);
+        }
     }
 }
 
@@ -158,21 +189,62 @@ void Rs485Devices_Init(void)
 
     /** EMM 默认地址为 2；地址 1 已分配给 GFL-Z 激光传感器。 */
     /*
-     * 【临时·帧级调试】2026/10/10 排查"任务序列 1/9 同步步：广播触发后两台电机不动、
-     * 目标从未设置"。需要看 EMM 的原始 TX/RX 字节，用来对比：
-     *   - 手动发 L3 命令（能同步运动）时，缓存命令 / 触发帧 / 驱动器应答长什么样；
-     *   - 任务序列发同样的命令（不同步）时，线上字节差在哪里。
-     * 该开关**全局生效**、输出较啰嗦（每条帧一行 TX + 一行 RX）；
-     * 定位完成后请改回 `false`。详见《修改日志.md》§7.13。
+     * 【帧级调试】2026/10/10 为排查"任务序列 1/9 同步步：广播触发后两台电机不动、
+     * 目标从未设置"临时打开，2026/10/21 按用户要求**关闭**。
+     *
+     * ⚠️ 别随手再打开：`logFrame()` 走 `ESP_LOGI` → `Serial`（UART0，115200），
+     *    而 **CH9120 就挂在同一根 UART0 上做 TCP 透传**（见 ch9120_net.cpp
+     *    `Ch9120Net_RestoreWorkMode()` 里的 `Serial.begin(CH9120_NET_UART_BAUD)`）。
+     *    打开后每帧多两行（TX/RX，单行最长 192 字符）十六进制日志，会**原样进入
+     *    上位机收到的 TCP 数据流**：既挤占带宽，也会打乱上位机"按行解析应答"的节奏。
+     *    真需要抓帧时，只在一个短窗口内打开，抓完立刻改回 `false`。
+     *    历史见《修改日志.md》§7.13。
      */
-    gEmm.setDebugEnabled(true);
+    gEmm.setDebugEnabled(false);
     gEmm.begin(EMM_DEFAULT_ADDR);
 
     s_rs485Inited = true;
 }
 
 /**
- * @brief 创建接近开关监控任务并启用 GPIO 下降沿中断。
+ * @brief 使能 / 关闭接近开关监控（**2026/10/16 新增**，上电默认**使能**）。
+ * @param enabled true=使能（接近开关触发会停止 MONITOR_EMM 的电机）；
+ *                false=关闭（不再发送停止命令，但 GPIO 中断仍挂着）。
+ * @note 关闭后，`emmEndstopMonitorTask()` 收到下降沿通知会立即丢弃，不消费
+ *       "引脚是否仍为低电平"的判断；若此刻正卡在"等待引脚恢复高电平"的循环里，
+ *       本函数也会让它立刻退出（循环条件带上了该标志）。
+ * @note 关闭时**不会**主动补发停止命令；重新使能时若引脚正处于低电平，
+ *       也**不会**补发停止（下一次下降沿才生效）—— 这两点由调用方保证安全：
+ *       重新使能发生在 `SET POWER ON`（2026/10/19 新增）、断电收尾
+ *       （`sysPowerOffCleanup()`）与样品盘零点标定步骤开始处，这些时刻托盘
+ *       都不处于"正在压住开关并被要求运动"的状态。
+ */
+void EmmEndstopMonitor_SetEnabled(bool enabled)
+{
+    if (s_emmEndstopMonitorEnabled == enabled) {
+        return;
+    }
+
+    s_emmEndstopMonitorEnabled = enabled;
+
+    Serial.printf("[EMM监控] 接近开关监控已%s：GPIO%d 触发%s停止地址%d的电机\n",
+                  enabled ? "使能" : "关闭",
+                  Y_ENDSTOP2_PIN,
+                  enabled ? "会" : "不再",
+                  MONITOR_EMM);
+}
+
+/**
+ * @brief 查询接近开关监控当前是否使能（true=触发会停 MONITOR_EMM 的电机）。
+ * @note 仅供上层判断是否需要显式恢复，不做任何副作用。
+ */
+bool EmmEndstopMonitor_IsEnabled(void)
+{
+    return s_emmEndstopMonitorEnabled;
+}
+
+/**
+ * @brief 创建 Y_ENDSTOP2_PIN（GPIO6）的接近开关监控任务。
  * @details 必须在 Rs485Devices_Init() 之后调用，确保停止任务执行时 UART、
  *          EMM 驱动对象和 RS485 互斥锁均已完成初始化。
  */
