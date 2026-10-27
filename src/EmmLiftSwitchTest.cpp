@@ -16,8 +16,12 @@
  * @brief 3 号升降电机的接近开关引脚。
  * @details **2026/10/27 新增**。沿用 KWQ2 `stepper.h` 里 `Z1_ENDSTOP_PIN = 2` 的接线
  *          （板子上 Z1 那一路）；KWQ3 提纯成单升降后这个脚一直空着，本次接上开关。
- *          电气规格与样品盘那一路（`Y_ENDSTOP2_PIN` = GPIO6）一致：
- *          `INPUT_PULLUP`，**低电平 = 触发**。
+ *
+ *          ⚠️ **本路是「高电平 = 触发」**（2026/10/27 用户确认）——
+ *          与样品盘那一路（`Y_ENDSTOP2_PIN` = GPIO6，**低电平触发**）**极性相反**。
+ *          所以引脚配 `INPUT_PULLDOWN` 而不是 `INPUT_PULLUP`：
+ *          下拉能让"开关没接 / 线断了"时读到**低电平 = 未触发**，是最安全的失效方向；
+ *          若错配成上拉，悬空就会被读成"一直触发"，⓪ 防漂移会白降 8 s 然后报错。
  * @note 故意**不**放进 `Rs485Devices.h`：那一份是"正式硬件映射"，本模块只是试验，
  *       放进去会让人以为 3 号已经有常驻的开关保护（其实没有）。
  */
@@ -62,7 +66,7 @@
 /**
  * @brief "下降退出触发区"的最长等待，单位 ms。
  * @details 正常情况下开关刚触发，往下走几十~几百脉冲就释放（几十 ms）。
- *          给 8 s 是为了兜住"开关坏了常低"的极端情况 —— 那时 3 号会一直往下走，
+ *          给 8 s 是为了兜住"开关坏了常高"的极端情况 —— 那时 3 号会一直往下走，
  *          8 s 约 17000 脉冲，还不至于撞到行程底，然后判失败、停机、报错。
  */
 #define LIFT_TEST_ESCAPE_MAX_WAIT_MS    8000U
@@ -83,17 +87,30 @@ static void liftTestLog(const char *text)
 }
 
 /**
- * @brief 速度模式转动 3 号，直到接近开关达到指定电平（或超时）。
+ * @brief 读接近开关**是否处于触发状态**。
+ * @details 本路开关是**高电平触发**（`HIGH` = 触发，`LOW` = 释放）。
+ *          把极性判断集中到这一个函数里，是为了避免"`== HIGH` / `== LOW`"
+ *          散落在四处、改一次漏一处 —— 2026/10/27 就是因为按样品盘那一路
+ *          （低电平触发）写反过一次。
+ * @return true = 已触发；false = 未触发。
+ */
+static bool liftTestTriggered(void)
+{
+    return digitalRead(LIFT_TEST_PIN) == HIGH;
+}
+
+/**
+ * @brief 速度模式转动 3 号，直到接近开关达到指定状态（或超时）。
  * @details 只负责"起转 → 等电平 → 发停止"，**不做任何零点设置**。
  *          自己轮询 GPIO，不依赖任何监控任务 —— 所以即使将来加了常驻监控、
  *          或者监控被关掉，这条命令的行为都不变。
- * @param direction 转动方向（`0`=上升 / `1`=下降）
- * @param waitLow   true = 等开关**触发**（低电平）；false = 等开关**释放**（高电平）
- * @param maxWaitMs 最长等待，单位 ms
- * @param label     子动作中文说明（日志用，必须指向静态存储）
- * @return true 达到目标电平（且已发停止）；false 超时或命令被拒。
+ * @param direction     转动方向（`0`=上升 / `1`=下降）
+ * @param waitTriggered true = 等开关**触发**（高电平）；false = 等开关**释放**（低电平）
+ * @param maxWaitMs     最长等待，单位 ms
+ * @param label         子动作中文说明（日志用，必须指向静态存储）
+ * @return true 达到目标状态（且已发停止）；false 超时或命令被拒。
  */
-static bool liftTestSpinUntil(uint8_t direction, bool waitLow,
+static bool liftTestSpinUntil(uint8_t direction, bool waitTriggered,
                               uint32_t maxWaitMs, const char *label)
 {
     Serial.printf("[3号测试]   └─ %s\n", label);
@@ -131,13 +148,13 @@ static bool liftTestSpinUntil(uint8_t direction, bool waitLow,
     Serial.printf("[3号测试]   └─ 速度模式已启动：A=%u DIR=%u RPM=%u ACC=%u，等待接近开关%s\n",
                   (unsigned)LIFT_TEST_MOTOR, (unsigned)direction,
                   (unsigned)LIFT_TEST_RPM, (unsigned)LIFT_TEST_ACC,
-                  waitLow ? "触发（低电平）" : "释放（高电平）");
+                  waitTriggered ? "触发（高电平）" : "释放（低电平）");
 
     /* ---- 2. 轮询接近开关 ---- */
     const uint32_t startedAt = millis();
     bool reached = false;
     for (;;) {
-        if ((digitalRead(LIFT_TEST_PIN) == LOW) == waitLow) {
+        if (liftTestTriggered() == waitTriggered) {
             reached = true;
             break;
         }
@@ -160,7 +177,7 @@ static bool liftTestSpinUntil(uint8_t direction, bool waitLow,
 
     if (!reached) {
         Serial.printf("[3号测试]   └─ 失败：等待接近开关%s超时（%lu ms）\n",
-                      waitLow ? "触发" : "释放", (unsigned long)maxWaitMs);
+                      waitTriggered ? "触发" : "释放", (unsigned long)maxWaitMs);
         return false;
     }
     return true;
@@ -258,27 +275,31 @@ bool cmdSetEmmLiftTest(const char *args, int seq)
     Serial.println("[3号测试] 提示：若已下发过 SET EMM LIFT MONITOR ARM=1，"
                    "建议测试前先 ARM=0，避免扎偏保护在触发点附近误动作把 3 号再往上抬");
 
-    /* 先把引脚配成上拉输入：本模块不依赖任何监控任务，必须自己配一次。 */
-    pinMode(LIFT_TEST_PIN, INPUT_PULLUP);
-    /* 上电/换线后立刻读一次，日志里留个底，便于判断开关是不是常低。 */
-    Serial.printf("[3号测试] GPIO%u 初始电平=%s\n",
+    /*
+     * 先把引脚配成**下拉**输入：本路开关是高电平触发，下拉能保证"没接 / 断线"时
+     * 读到低电平（= 未触发），是最安全的失效方向。本模块不依赖任何监控任务，
+     * 必须自己配一次。
+     */
+    pinMode(LIFT_TEST_PIN, INPUT_PULLDOWN);
+    /* 上电/换线后立刻读一次，日志里留个底，便于判断开关是不是常高。 */
+    Serial.printf("[3号测试] GPIO%u 初始电平=%s（本路为高电平触发）\n",
                   (unsigned)LIFT_TEST_PIN,
-                  digitalRead(LIFT_TEST_PIN) == LOW ? "低（已触发）" : "高（未触发）");
+                  liftTestTriggered() ? "高（已触发）" : "低（未触发）");
 
     /*
-     * ⓪ 防漂移：若开关此刻已经是低电平（上一次测试就停在触发点、或者人工把 3 号
+     * ⓪ 防漂移：若开关此刻已经是**高电平**（上一次测试就停在触发点、或者人工把 3 号
      *    开到了顶），先下降退出触发区再重新向上找。
      *    没有这一步，下面的"等触发"会**立刻**判定成功，3 号一步都不走，
      *    测出来的停止距离就是 0，等于什么都没验证。
      *    （这一条只在"测停止效果"的语境下是必要的；将来若真把触发点设成零点，
      *      它同时也是防零点漂移的前提。）
      */
-    if (digitalRead(LIFT_TEST_PIN) == LOW) {
+    if (liftTestTriggered()) {
         liftTestLog("接近开关已处于触发状态，先下降退出触发区");
-        if (!liftTestSpinUntil(LIFT_TEST_DOWN_DIR, /*waitLow=*/false,
+        if (!liftTestSpinUntil(LIFT_TEST_DOWN_DIR, /*waitTriggered=*/false,
                                LIFT_TEST_ESCAPE_MAX_WAIT_MS,
                                "下降至接近开关释放")) {
-            liftTestLog("失败：8 s 内退不出触发区，放弃本次测试（开关可能常低）");
+            liftTestLog("失败：8 s 内退不出触发区，放弃本次测试（开关可能常高）");
             sendWithCRC("ERR @%d %d", seq, EMM_HOME_FAILED);
             return false;
         }
@@ -290,7 +311,7 @@ bool cmdSetEmmLiftTest(const char *args, int seq)
     const bool startPosOk = liftTestReadPosition(startPos);
 
     /* ① 上升找开关，触发立即停 */
-    if (!liftTestSpinUntil(LIFT_TEST_UP_DIR, /*waitLow=*/true,
+    if (!liftTestSpinUntil(LIFT_TEST_UP_DIR, /*waitTriggered=*/true,
                            LIFT_TEST_UP_MAX_WAIT_MS,
                            "上升至接近开关触发")) {
         liftTestLog("失败：3 号上升未找到接近开关触发（检查开关接线 / 极性 / 是否已到顶）");
@@ -316,7 +337,7 @@ bool cmdSetEmmLiftTest(const char *args, int seq)
 
     Serial.println("[3号测试] ========== 结束：接近开关触发，3 号已停止 ==========");
     /*
-     * 这里必须提醒一句：3 号此刻正**压在开关上**（开关仍是低电平）。
+     * 这里必须提醒一句：3 号此刻正**压在开关上**（开关仍是高电平）。
      * 本模块没有常驻监控，所以不会反复发停止帧；但下一次跑本命令时，⓪ 那一步
      * 会先把它降下来。若要接着跑任务，记得先用 SET EMM MOVE 把 3 号开回工作高度。
      */
